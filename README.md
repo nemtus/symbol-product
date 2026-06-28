@@ -1,3 +1,20 @@
+<!-- nemtus-mirror-notice -->
+> **Note (nemtus mirror):** This repository is a NEMTUS mirror of
+> [`symbol/product`](https://github.com/symbol/product) (tracked branch: `dev`). Most components are
+> unmodified from upstream. The NEMTUS layer makes the node-setup tooling **upstream-independent**:
+>
+> - **`tools/shoestring`** → published to PyPI as **`nemtus-symbol-shoestring`**; resolves network
+>   configuration from [`nemtus/symbol-networks`](https://github.com/nemtus/symbol-networks) and uses the
+>   NEMTUS node images `ghcr.io/nemtus/catapult-server` and `ghcr.io/nemtus/symbol-rest`.
+> - **`lightapi/python`** → published to PyPI as **`nemtus-symbol-lightapi`** (import module
+>   `symbollightapi` unchanged).
+> - Python deps use the NEMTUS PyPI mirrors `nemtus-symbol-sdk` / `nemtus-catparser`.
+>
+> NEMTUS asserts no copyright over upstream content. For the canonical project, see
+> [symbol/product](https://github.com/symbol/product). Details, the mirror invariants, and the
+> upstream-follow process are documented in [`docs/nemtus-mirror.md`](docs/nemtus-mirror.md).
+<!-- /nemtus-mirror-notice -->
+
 # Symbol Product Monorepo
 
 In Q1 2022, we consolidated a number of projects into this repository.

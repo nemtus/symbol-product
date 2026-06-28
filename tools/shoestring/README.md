@@ -1,5 +1,13 @@
 # shoestring
 
+<!-- nemtus-mirror-notice -->
+> **Note (nemtus mirror):** This is the NEMTUS upstream-independent mirror of shoestring, published to
+> PyPI as **`nemtus-symbol-shoestring`**. It uses the NEMTUS node images (`ghcr.io/nemtus/...`), the
+> NEMTUS PyPI dependency mirrors, and resolves network configuration from
+> [`nemtus/symbol-networks`](https://github.com/nemtus/symbol-networks). See
+> [`docs/nemtus-mirror.md`](../../docs/nemtus-mirror.md) for the full picture.
+<!-- /nemtus-mirror-notice -->
+
 # Security
 
 > [!IMPORTANT]
