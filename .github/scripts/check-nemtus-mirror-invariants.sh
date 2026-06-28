@@ -44,7 +44,7 @@ else
 fi
 
 # 3. PackageResolver resolves config from nemtus/symbol-networks, not the upstream Release API.
-if grep -q 'nemtus/symbol-networks' "${PACKAGE_RESOLVER}"; then
+if grep -qE "^NEMTUS_NETWORKS_ARCHIVE_URL = 'https://github\.com/nemtus/symbol-networks/archive/" "${PACKAGE_RESOLVER}"; then
 	ok "${PACKAGE_RESOLVER} resolves config from nemtus/symbol-networks"
 else
 	fail "${PACKAGE_RESOLVER} must resolve network config from nemtus/symbol-networks"

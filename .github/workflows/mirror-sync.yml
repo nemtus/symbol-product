@@ -63,11 +63,9 @@ jobs:
           git checkout -b "$SYNC_BRANCH"
 
           if git merge --no-edit --no-ff "upstream/$UPSTREAM_BRANCH"; then
-            # clean merge
-            if git diff --quiet HEAD "origin/$LOCAL_BRANCH"; then
-              echo "Merged tree identical to origin/$LOCAL_BRANCH; nothing to sync."
-              exit 0
-            fi
+            # clean merge — always publish the merge commit (it records the upstream parent so the
+            # next run's `merge-base --is-ancestor` fast-path becomes true). Do NOT skip on a
+            # tree-identical merge: that would drop the parent link and replay the same range forever.
             git push -u origin "$SYNC_BRANCH" --force-with-lease
 
             if [ -n "$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[].number')" ]; then

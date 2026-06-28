@@ -12,7 +12,7 @@ package names.
 |---|---|---|
 | shoestring package | `symbol-shoestring` (PyPI) | **`nemtus-symbol-shoestring`** (PyPI) |
 | lightapi package | `symbol-lightapi` (PyPI) | **`nemtus-symbol-lightapi`** (PyPI; import module `symbollightapi` unchanged) |
-| Python deps | `symbol-sdk-python`, `catparser` | `nemtus-symbol-sdk` (import `symbolchain`), `nemtus-catparser` |
+| Python deps | `symbol-sdk-python` (pulls `catparser`) | `nemtus-symbol-sdk` (import `symbolchain`; pulls `nemtus-catparser` transitively) |
 | Node images | `symbolplatform/symbol-server`, `symbolplatform/symbol-rest` | `ghcr.io/nemtus/catapult-server`, `ghcr.io/nemtus/symbol-rest` |
 | Network config source | `symbol/symbol` releases + `symbol/networks` | branch archives of [`nemtus/symbol-networks`](https://github.com/nemtus/symbol-networks) (`main` / `test-sai`) |
 
@@ -83,11 +83,14 @@ first release:
 - register PyPI **pending trusted publishers** for `nemtus-symbol-lightapi` (workflow `publish-lightapi.yaml`)
   and `nemtus-symbol-shoestring` (workflow `publish-shoestring.yaml`), environment `pypi-production`.
 
-Publish order is **lightapi → shoestring** (shoestring depends on lightapi):
+Publish order is **lightapi → shoestring** (shoestring depends on lightapi). Use the actual package
+versions from `lightapi/python/setup.cfg` and `tools/shoestring/pyproject.toml`; the numbers below are
+examples at the time of writing:
 
 ```bash
-git tag nemtus-symbol-lightapi@0.0.9   && git push origin nemtus-symbol-lightapi@0.0.9
-# confirm it is on PyPI, then:
-git tag nemtus-symbol-shoestring@0.2.4 && git push origin nemtus-symbol-shoestring@0.2.4
+git tag nemtus-symbol-lightapi@<lightapi-version>   && git push origin nemtus-symbol-lightapi@<lightapi-version>
+# e.g. nemtus-symbol-lightapi@0.0.9 ; confirm it is on PyPI, then:
+git tag nemtus-symbol-shoestring@<shoestring-version> && git push origin nemtus-symbol-shoestring@<shoestring-version>
+# e.g. nemtus-symbol-shoestring@0.2.4
 ```
 <!-- /nemtus-mirror-notice -->
