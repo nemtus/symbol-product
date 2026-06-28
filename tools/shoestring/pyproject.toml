@@ -1,18 +1,18 @@
 [tool.poetry]
-name = 'symbol-shoestring'
+name = 'nemtus-symbol-shoestring'
 version = '0.2.4'
-description = 'Symbol Shoestring Deployment Tool'
+description = 'Symbol Shoestring Deployment Tool (NEMTUS mirror of upstream symbol-shoestring; uses NEMTUS mirror images and dependencies)'
 authors = ['Symbol Contributors <contributors@symbol.dev>']
-maintainers = ['Symbol Contributors <contributors@symbol.dev>']
+maintainers = ['NEMTUS <info@nemtus.com>']
 license = 'MIT'
 
 readme = 'README.md'
 
 packages = [{ include = 'shoestring' }]
 
-repository = 'https://github.com/symbol/product/tree/main/tools/shoestring'
+repository = 'https://github.com/nemtus/symbol-product/tree/dev/tools/shoestring'
 
-keywords = ['symbol', 'shoestring', 'deployment', 'node']
+keywords = ['symbol', 'shoestring', 'deployment', 'node', 'nemtus']
 
 classifiers = [
 	'Programming Language :: Python :: 3.10',
@@ -26,6 +26,19 @@ include = ['shoestring/lang/*/LC_MESSAGES/messages.mo']
 
 [tool.poetry.dependencies]
 python = "^3.10"
+aiohttp = "~3.14.0"
+Jinja2 = "~3.1.2"
+prompt_toolkit = "~3.0.39"
+PyYAML = "~6.0.1"
+requests = "~2.34.2"
+nemtus-symbol-lightapi = "~0.0.9"
+nemtus-symbol-sdk = "~3.3.2"
+websockets = "~16.0"
+zenlog = "~1.1"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
 
 [tool.pytest.ini_options]
 filterwarnings = [
