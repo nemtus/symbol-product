@@ -19,7 +19,7 @@ jobs:
   build-and-publish:
     name: Build and publish to PyPI
     runs-on: ubuntu-latest
-    environment: pypi
+    environment: pypi-production
     permissions:
       # required for PyPI Trusted Publishing (OIDC)
       id-token: write
