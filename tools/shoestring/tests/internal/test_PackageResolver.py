@@ -1,4 +1,3 @@
-import json
 import tempfile
 from pathlib import Path
 from zipfile import ZipFile
@@ -10,147 +9,53 @@ from shoestring.internal.PackageResolver import download_and_extract_package, re
 
 from ..test.TestPackager import prepare_testnet_package
 
-# region server fixture
-
-
-@pytest.fixture
-async def server(aiohttp_client):
-	class MockReleasesServer:
-		def __init__(self):
-			self.urls = []
-
-		async def api_symbol_height(self, request):
-			return await self._process(request, [
-				{
-					'tag_name': 'client/catapult/4',
-					'assets': [{'name': 'alpha-444', 'browser_download_url': 'www.symbol.com/a444.zip', 'tag': 'a'}]
-				},
-				{
-					'tag_name': 'client/catapult/x',
-				},
-				{
-					'tag_name': 'client/catapult/3',
-					'assets': [{'name': 'alpha-333', 'browser_download_url': 'www.symbol.com/a333.zip', 'tag': 'b'}]
-				},
-				{
-					'tag_name': 'sdk/javascript/2',
-					'assets': [{'name': 'beta-222', 'browser_download_url': 'www.symbol.com/b222.zip', 'tag': 'c'}]
-				},
-				{
-					'tag_name': 'client/catapult/1',
-					'assets': [
-						{'name': 'gamma-112', 'browser_download_url': 'www.symbol.com/g112.zip', 'tag': 'd'},
-						{'name': 'gamma-115', 'browser_download_url': 'www.symbol.com/g115.zip', 'tag': 'e'}
-					]
-				},
-				{
-					'tag_name': 'client/catapult/v1.0.3.9',
-					'assets': [{'name': 'latest', 'browser_download_url': 'www.symbol.com/latest.zip', 'tag': 'client/catapult/v1.0.3.9'}]
-				}
-			])
-
-		async def _process(self, request, response_body):
-			self.urls.append(str(request.url))
-			return web.Response(body=json.dumps(response_body), headers={'Content-Type': 'application/json'})
-
-	# create a mock server
-	mock_server = MockReleasesServer()
-
-	# create an app using the server
-	app = web.Application()
-	app.router.add_get('/releases', mock_server.api_symbol_height)
-	server = await aiohttp_client(app)  # pylint: disable=redefined-outer-name
-
-	server.mock = mock_server
-	return server
-
-
-# endregion
-
-
 # pylint: disable=invalid-name
 
-# region mainnet
+# region resolve_package
 
-async def _assert_mainnet_resolution_success(server, asset_prefix, expected_download_descriptor):  # pylint: disable=redefined-outer-name
+# Network configuration is resolved to NEMTUS mirror branch archives of nemtus/symbol-networks
+# (see that repo's docs/contract.md): mainnet -> main, sai -> test-sai. No upstream Release API
+# call and no SHA512 pin (branch archives are not byte-reproducible).
+
+
+async def test_mainnet_resolution_returns_nemtus_main_branch_archive():
 	# Act:
-	download_descriptor = await resolve_package('mainnet', releases_uri=f'{server.make_url("")}/releases', asset_prefix=asset_prefix)
+	download_descriptor = await resolve_package('mainnet')
 
 	# Assert:
-	assert [f'{server.make_url("")}/releases'] == server.mock.urls
-	assert expected_download_descriptor == download_descriptor
-
-
-async def test_mainnet_resolution_returns_first_release_with_matching_asset(server):  # pylint: disable=redefined-outer-name
-	# Assert: client/catapult/4 is the first release that has an asset starting with "alpha" (partial match)
-	await _assert_mainnet_resolution_success(server, 'alpha', {
-		'name': 'configuration-package.zip',
-		'url': 'www.symbol.com/a444.zip'
-	})
-
-
-async def test_mainnet_resolution_returns_first_release_with_exact_matching_asset(server):  # pylint: disable=redefined-outer-name
-	# Assert: client/catapult/3 is the first release that has an asset starting with "alpha-333" (exact match)
-	await _assert_mainnet_resolution_success(server, 'alpha-333', {
-		'name': 'configuration-package.zip',
-		'url': 'www.symbol.com/a333.zip'
-	})
-
-
-async def test_mainnet_resolution_returns_first_matching_asset_within_first_release(server):  # pylint: disable=redefined-outer-name
-	# Assert: client/catapult/1 has two matching assets but the first is returned
-	await _assert_mainnet_resolution_success(server, 'gamma-112', {
-		'name': 'configuration-package.zip',
-		'url': 'www.symbol.com/g112.zip'
-	})
-
-
-async def test_mainnet_resolution_returns_official_hash_when_available(server):  # pylint: disable=redefined-outer-name
-	await _assert_mainnet_resolution_success(server, 'latest', {
-		'name': 'configuration-package.zip',
-		'url': 'www.symbol.com/latest.zip',
-		'hash': (
-			'895AB5284768278BEBBEB8F40D3F15D20F78B464E705BA9AFCA444248F3C4EF2'
-			'335DEC40A5CCABFE18E6E9BBB9EA36EC495F10A77CBEDE6F30A29DEB621F97F2'
-		)
-	})
-
-
-async def _assert_cannot_find_asset(server, asset_prefix):  # pylint: disable=redefined-outer-name
-	with pytest.raises(RuntimeError):
-		await resolve_package('mainnet', releases_uri=f'{server.make_url("")}/releases', asset_prefix=asset_prefix)
-
-
-async def test_mainnet_resolution_fails_when_non_catapult_release_has_matching_asset(server):  # pylint: disable=redefined-outer-name
-	await _assert_cannot_find_asset(server, 'beta')  # matches asset in sdk/javascript/2 release
-
-
-async def test_mainnet_resolution_fails_when_no_release_has_matching_asset(server):  # pylint: disable=redefined-outer-name
-	await _assert_cannot_find_asset(server, 'alpha-000')  # no asset name starts with this prefix
-
-# endregion
-
-
-# region testnet
-
-async def test_testnet_resolution_can_resolve_named_testnet(server):  # pylint: disable=redefined-outer-name
-	# Act:
-	download_descriptor = await resolve_package('sai', releases_uri=f'{server.make_url("")}/releases')
-
-	# Assert:
-	assert [] == server.mock.urls
 	assert {
 		'name': 'configuration-package.zip',
-		'url': 'https://github.com/symbol/networks/archive/refs/heads/sai.zip'
+		'url': 'https://github.com/nemtus/symbol-networks/archive/refs/heads/main.zip'
 	} == download_descriptor
 
 
-async def test_testnet_resolution_can_resolve_custom_testnet(server):  # pylint: disable=redefined-outer-name
+async def test_testnet_resolution_can_resolve_named_testnet():
 	# Act:
-	download_descriptor = await resolve_package('https://foo.zip', releases_uri=f'{server.make_url("")}/releases')
+	download_descriptor = await resolve_package('sai')
 
 	# Assert:
-	assert [] == server.mock.urls
+	assert {
+		'name': 'configuration-package.zip',
+		'url': 'https://github.com/nemtus/symbol-networks/archive/refs/heads/test-sai.zip'
+	} == download_descriptor
+
+
+async def test_testnet_resolution_maps_legacy_upstream_alias_to_nemtus_mirror():
+	# Act:
+	download_descriptor = await resolve_package('https://github.com/symbol/networks/tree/sai')
+
+	# Assert:
+	assert {
+		'name': 'configuration-package.zip',
+		'url': 'https://github.com/nemtus/symbol-networks/archive/refs/heads/test-sai.zip'
+	} == download_descriptor
+
+
+async def test_resolution_passes_through_custom_url():
+	# Act:
+	download_descriptor = await resolve_package('https://foo.zip')
+
+	# Assert:
 	assert {
 		'name': 'configuration-package.zip',
 		'url': 'https://foo.zip'

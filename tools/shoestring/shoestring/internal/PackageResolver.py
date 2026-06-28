@@ -1,72 +1,38 @@
 import shutil
 from zipfile import ZipFile
 
-from aiohttp import ClientSession
-
 from .FileDownloader import download_file
 
-SYMBOL_GITHUB_URI = 'https://api.github.com/repos/symbol/symbol/releases'
-OFFICIAL_HASHES = {
-	'client/catapult/v1.0.3.9': (
-		'895AB5284768278BEBBEB8F40D3F15D20F78B464E705BA9AFCA444248F3C4EF2'
-		'335DEC40A5CCABFE18E6E9BBB9EA36EC495F10A77CBEDE6F30A29DEB621F97F2'
-	)
+# Network configuration is served by the NEMTUS mirror as branch archives of
+# nemtus/symbol-networks (see that repo's docs/contract.md). This keeps shoestring
+# independent of upstream (symbol/symbol, symbol/networks, symbol.tools) at runtime.
+NEMTUS_NETWORKS_ARCHIVE_URL = 'https://github.com/nemtus/symbol-networks/archive/refs/heads/{branch}.zip'
+
+# maps a named network to its nemtus/symbol-networks branch
+NETWORK_BRANCHES = {
+	'mainnet': 'main',
+	'sai': 'test-sai',
 }
 
 
-async def _get_releases(releases_uri):
-	async with ClientSession() as session:
-		async with session.get(releases_uri) as response:
-			response_json = await response.json()
-			return response_json
+def _resolve_url(package_identifier):
+	if package_identifier in NETWORK_BRANCHES:
+		return NEMTUS_NETWORKS_ARCHIVE_URL.format(branch=NETWORK_BRANCHES[package_identifier])
+
+	# accept the legacy upstream testnet alias and map it to the NEMTUS mirror
+	if 'https://github.com/symbol/networks/tree/sai' == package_identifier:
+		return NEMTUS_NETWORKS_ARCHIVE_URL.format(branch='test-sai')
+
+	# otherwise treat the identifier as a direct URL or file path
+	return package_identifier
 
 
-def _find_asset(releases, asset_prefix):
-	for release in releases:
-		tag_name = release['tag_name']
-		if not tag_name.startswith('client/catapult'):
-			continue
-
-		if not release.get('assets'):
-			continue
-
-		for asset in release['assets']:
-			if asset['name'].startswith(asset_prefix):
-				return {
-					'tag': tag_name,
-					'asset': asset
-				}
-
-	raise RuntimeError(f'couldn\'t find asset {asset_prefix}')
-
-
-def _resolve_testnet_name(name):
-	if name in ('https://github.com/symbol/networks/tree/sai', 'sai'):
-		return 'https://github.com/symbol/networks/archive/refs/heads/sai.zip'
-
-	return name
-
-
-async def resolve_package(package_identifier, asset_prefix='configuration-mainnet', releases_uri=SYMBOL_GITHUB_URI):
+async def resolve_package(package_identifier):
 	"""Resolves a package identifier into an object specifying download instructions."""
 
-	if 'mainnet' == package_identifier:
-		releases = await _get_releases(releases_uri)
-		asset_descriptor = _find_asset(releases, asset_prefix)
-		download_descriptor = {
-			'name': 'configuration-package.zip',
-			'url': asset_descriptor['asset']['browser_download_url']
-		}
-
-		if asset_descriptor['tag'] in OFFICIAL_HASHES:
-			download_descriptor['hash'] = OFFICIAL_HASHES[asset_descriptor['tag']]
-
-		return download_descriptor
-
-	url = _resolve_testnet_name(package_identifier)
 	return {
 		'name': 'configuration-package.zip',
-		'url': url
+		'url': _resolve_url(package_identifier)
 	}
 
 

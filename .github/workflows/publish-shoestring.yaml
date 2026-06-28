@@ -1,0 +1,41 @@
+name: Publish nemtus-symbol-shoestring
+
+# Publishes the NEMTUS mirror of shoestring to PyPI as `nemtus-symbol-shoestring`.
+# Trigger by pushing a tag like `nemtus-symbol-shoestring@0.2.4`, or run manually.
+# Uses PyPI Trusted Publishing (OIDC) — configure a trusted publisher on PyPI for
+# this repository + workflow filename (no API token secret required).
+
+'on':
+  push:
+    tags: ['nemtus-symbol-shoestring@*']
+  workflow_dispatch: {}
+
+jobs:
+  build-and-publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi-production
+    permissions:
+      # required for PyPI Trusted Publishing (OIDC)
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Build sdist and wheel
+        working-directory: tools/shoestring
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: tools/shoestring/dist

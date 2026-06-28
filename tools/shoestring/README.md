@@ -404,7 +404,7 @@ apt-get install python3 python3-pip openssl
 ## Installing and running prepared package:
 
 ```sh
-python3 -m pip install symbol-shoestring
+python3 -m pip install nemtus-symbol-shoestring
 python3 -m shoestring --help
 ```
 
