@@ -1,0 +1,125 @@
+name: Mirror sync (upstream symbol/product)
+
+# Follows upstream github.com/symbol/product:dev. Unlike nemtus/symbol-networks (a content
+# mirror regenerable by a patch), this repo carries real code edits (the NEMTUS mirror layer),
+# so upstream arrives via a git MERGE:
+#   - clean merge  -> push a sync branch and open a PR (merge with a MERGE COMMIT, not squash)
+#   - conflict     -> abort and file a tracking issue listing the conflicts for manual resolution
+# The ci.yml `parity` job re-checks the mirror invariants before any sync PR can merge.
+# Note: the `_symbol` submodule (symbol/symbol, for linters/build-ci) is a SEPARATE sync owned
+# by the existing Jenkins updateSubmodule job — not handled here. See docs/nemtus-mirror.md.
+
+'on':
+  schedule:
+    - cron: '17 4 * * 1'  # weekly, Monday 04:17 UTC
+  workflow_dispatch: {}
+
+concurrency:
+  group: mirror-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  UPSTREAM_REMOTE: https://github.com/symbol/product.git
+  UPSTREAM_BRANCH: dev
+  LOCAL_BRANCH: dev
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: dev
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Sync upstream -> PR (or issue on conflict)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+          gh label create upstream-sync --color ededed --description 'Automated upstream mirror sync' --force >/dev/null 2>&1 || true
+
+          git remote add upstream "$UPSTREAM_REMOTE"
+          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+          UPSTREAM_SHA="$(git rev-parse --short "upstream/$UPSTREAM_BRANCH")"
+
+          # fast-path: our branch already contains every upstream commit
+          if git merge-base --is-ancestor "upstream/$UPSTREAM_BRANCH" HEAD; then
+            echo "Already up to date with upstream@${UPSTREAM_SHA}; nothing to sync."
+            exit 0
+          fi
+
+          SYNC_BRANCH="sync/upstream-${UPSTREAM_SHA}"
+          git checkout -b "$SYNC_BRANCH"
+
+          if git merge --no-edit --no-ff "upstream/$UPSTREAM_BRANCH"; then
+            # clean merge — always publish the merge commit (it records the upstream parent so the
+            # next run's `merge-base --is-ancestor` fast-path becomes true). Do NOT skip on a
+            # tree-identical merge: that would drop the parent link and replay the same range forever.
+            git push -u origin "$SYNC_BRANCH" --force-with-lease
+
+            if [ -n "$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[].number')" ]; then
+              echo "PR already open for $SYNC_BRANCH."
+              exit 0
+            fi
+
+            BODY="$(printf '%s\n' \
+              "Automated mirror sync. Merges upstream \`symbol/product:${UPSTREAM_BRANCH}\`@\`${UPSTREAM_SHA}\` into \`${LOCAL_BRANCH}\`." \
+              "" \
+              "**Merge this PR with a MERGE COMMIT (not squash).** Squashing drops the upstream parent, which would make every future sync replay all of upstream history as one giant diff." \
+              "" \
+              "The \`parity\` CI job re-checks the NEMTUS mirror invariants (\`.github/scripts/check-nemtus-mirror-invariants.sh\`). Ensure it is green before merging — if upstream touched a mirrored file, reconcile so the invariants still hold. See \`docs/nemtus-mirror.md\`.")"
+
+            gh pr create \
+              --base "$LOCAL_BRANCH" \
+              --head "$SYNC_BRANCH" \
+              --label upstream-sync \
+              --title "Sync upstream symbol/product:${UPSTREAM_BRANCH}@${UPSTREAM_SHA}" \
+              --body "$BODY"
+          else
+            # conflict: do not auto-resolve code; file a tracking issue
+            CONFLICTS="$(git diff --name-only --diff-filter=U | sort)"
+            git merge --abort
+
+            TITLE="Upstream sync conflict: symbol/product@${UPSTREAM_SHA}"
+            if [ -n "$(gh issue list --state open --search "${TITLE} in:title" --json number --jq '.[].number')" ]; then
+              echo "Tracking issue already open."
+              exit 0
+            fi
+
+            BODY="$(printf '%s\n' \
+              "Automated mirror sync could not merge upstream \`symbol/product:${UPSTREAM_BRANCH}\`@\`${UPSTREAM_SHA}\` cleanly." \
+              "" \
+              "Conflicting files:" \
+              '```' \
+              "${CONFLICTS}" \
+              '```' \
+              "" \
+              "Resolve locally (merge commit, not squash):" \
+              '```bash' \
+              "git checkout ${LOCAL_BRANCH} && git pull" \
+              "git remote add upstream ${UPSTREAM_REMOTE} 2>/dev/null || true" \
+              "git fetch upstream ${UPSTREAM_BRANCH}" \
+              "git checkout -b sync/upstream-${UPSTREAM_SHA}" \
+              "git merge --no-ff upstream/${UPSTREAM_BRANCH}" \
+              "# resolve conflicts, keeping the NEMTUS mirror layer (see docs/nemtus-mirror.md), then:" \
+              "bash .github/scripts/check-nemtus-mirror-invariants.sh" \
+              "git push -u origin sync/upstream-${UPSTREAM_SHA}" \
+              "gh pr create --base ${LOCAL_BRANCH} --title 'Sync upstream symbol/product:${UPSTREAM_BRANCH}@${UPSTREAM_SHA}'" \
+              '```')"
+
+            gh issue create \
+              --label upstream-sync \
+              --title "$TITLE" \
+              --body "$BODY"
+          fi
