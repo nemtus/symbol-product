@@ -45,6 +45,10 @@ the shoestring/lightapi package names are the `nemtus-*` names; `PackageResolver
    - **clean merge** → opens a PR;
    - **conflict** → aborts and files a tracking issue listing the conflicting files for manual resolution.
 
+The sync PR is opened by `github-actions[bot]` (the built-in `GITHUB_TOKEN`), so its `ci.yml` runs start
+in an approval-required state: click **"Approve workflows to run"** in the PR merge box to run
+`parity`/`lightapi`/`shoestring`. This is intentional — automated changes don't run CI unattended.
+
 > **Always merge a sync PR with a MERGE COMMIT (not squash).** Squashing drops the upstream parent, which
 > makes every later sync replay all of upstream history as one giant diff and breaks the fast-path.
 

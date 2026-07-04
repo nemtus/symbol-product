@@ -83,9 +83,12 @@ jobs:
             gh pr create \
               --base "$LOCAL_BRANCH" \
               --head "$SYNC_BRANCH" \
-              --label upstream-sync \
               --title "Sync upstream symbol/product:${UPSTREAM_BRANCH}@${UPSTREAM_SHA}" \
               --body "$BODY"
+
+            # Label after creation, non-fatally: a missing/failed label must never abort PR creation
+            # (gh pr create --label validates the label up front and aborts the whole run if absent).
+            gh pr edit "$SYNC_BRANCH" --add-label upstream-sync || true
           else
             # conflict: do not auto-resolve code; file a tracking issue
             CONFLICTS="$(git diff --name-only --diff-filter=U | sort)"
@@ -118,8 +121,10 @@ jobs:
               "gh pr create --base ${LOCAL_BRANCH} --title 'Sync upstream symbol/product:${UPSTREAM_BRANCH}@${UPSTREAM_SHA}'" \
               '```')"
 
-            gh issue create \
-              --label upstream-sync \
+            ISSUE_URL="$(gh issue create \
               --title "$TITLE" \
-              --body "$BODY"
+              --body "$BODY")"
+
+            # Label after creation, non-fatally (see note on the PR path above).
+            gh issue edit "$ISSUE_URL" --add-label upstream-sync || true
           fi
