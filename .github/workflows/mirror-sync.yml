@@ -47,8 +47,6 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
 
-          gh label create upstream-sync --color ededed --description 'Automated upstream mirror sync' --force >/dev/null 2>&1 || true
-
           git remote add upstream "$UPSTREAM_REMOTE"
           git fetch --no-tags upstream "$UPSTREAM_BRANCH"
           UPSTREAM_SHA="$(git rev-parse --short "upstream/$UPSTREAM_BRANCH")"
@@ -83,43 +81,46 @@ jobs:
             gh pr create \
               --base "$LOCAL_BRANCH" \
               --head "$SYNC_BRANCH" \
-              --label upstream-sync \
               --title "Sync upstream symbol/product:${UPSTREAM_BRANCH}@${UPSTREAM_SHA}" \
               --body "$BODY"
+
+            # Decorative label, best-effort: attach it after creation, non-fatally. PR creation must
+            # not depend on the label existing (this is an Issues-disabled fork where the workflow's
+            # own token cannot create labels; `gh pr create --label` would validate up front and abort
+            # the whole run if the label were absent).
+            gh pr edit "$SYNC_BRANCH" --add-label upstream-sync || true
           else
-            # conflict: do not auto-resolve code; file a tracking issue
+            # conflict: do not auto-resolve code. This repo is an Issues-disabled fork, so we cannot
+            # file a tracking issue. Instead write the conflicting files + resolution steps to the job
+            # summary and fail the run — the red run (with this summary) is the signal to resolve the
+            # merge manually. Nothing here depends on Issues or labels.
             CONFLICTS="$(git diff --name-only --diff-filter=U | sort)"
             git merge --abort
 
-            TITLE="Upstream sync conflict: symbol/product@${UPSTREAM_SHA}"
-            if [ -n "$(gh issue list --state open --search "${TITLE} in:title" --json number --jq '.[].number')" ]; then
-              echo "Tracking issue already open."
-              exit 0
-            fi
+            {
+              echo "## Upstream sync conflict: symbol/product@${UPSTREAM_SHA}"
+              echo
+              echo "Could not merge upstream \`symbol/product:${UPSTREAM_BRANCH}\`@\`${UPSTREAM_SHA}\` into \`${LOCAL_BRANCH}\` cleanly."
+              echo
+              echo "### Conflicting files"
+              echo '```'
+              echo "${CONFLICTS}"
+              echo '```'
+              echo
+              echo "### Resolve locally (merge commit, not squash)"
+              echo '```bash'
+              echo "git checkout ${LOCAL_BRANCH} && git pull"
+              echo "git remote add upstream ${UPSTREAM_REMOTE} 2>/dev/null || true"
+              echo "git fetch upstream ${UPSTREAM_BRANCH}"
+              echo "git checkout -b sync/upstream-${UPSTREAM_SHA}"
+              echo "git merge --no-ff upstream/${UPSTREAM_BRANCH}"
+              echo "# resolve conflicts, keeping the NEMTUS mirror layer (see docs/nemtus-mirror.md), then:"
+              echo "bash .github/scripts/check-nemtus-mirror-invariants.sh"
+              echo "git push -u origin sync/upstream-${UPSTREAM_SHA}"
+              echo "gh pr create --base ${LOCAL_BRANCH} --title 'Sync upstream symbol/product:${UPSTREAM_BRANCH}@${UPSTREAM_SHA}'"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
 
-            BODY="$(printf '%s\n' \
-              "Automated mirror sync could not merge upstream \`symbol/product:${UPSTREAM_BRANCH}\`@\`${UPSTREAM_SHA}\` cleanly." \
-              "" \
-              "Conflicting files:" \
-              '```' \
-              "${CONFLICTS}" \
-              '```' \
-              "" \
-              "Resolve locally (merge commit, not squash):" \
-              '```bash' \
-              "git checkout ${LOCAL_BRANCH} && git pull" \
-              "git remote add upstream ${UPSTREAM_REMOTE} 2>/dev/null || true" \
-              "git fetch upstream ${UPSTREAM_BRANCH}" \
-              "git checkout -b sync/upstream-${UPSTREAM_SHA}" \
-              "git merge --no-ff upstream/${UPSTREAM_BRANCH}" \
-              "# resolve conflicts, keeping the NEMTUS mirror layer (see docs/nemtus-mirror.md), then:" \
-              "bash .github/scripts/check-nemtus-mirror-invariants.sh" \
-              "git push -u origin sync/upstream-${UPSTREAM_SHA}" \
-              "gh pr create --base ${LOCAL_BRANCH} --title 'Sync upstream symbol/product:${UPSTREAM_BRANCH}@${UPSTREAM_SHA}'" \
-              '```')"
-
-            gh issue create \
-              --label upstream-sync \
-              --title "$TITLE" \
-              --body "$BODY"
+            echo "::error::Upstream sync conflict with symbol/product@${UPSTREAM_SHA}; see the job summary for the conflicting files and resolution steps."
+            exit 1
           fi
