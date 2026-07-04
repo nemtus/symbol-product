@@ -42,6 +42,12 @@ jobs:
       - name: Sync upstream -> PR (or issue on conflict)
         env:
           GH_TOKEN: ${{ github.token }}
+          # This repo is a FORK of symbol/product, and the step below adds an `upstream` remote
+          # pointing at the parent. Without GH_REPO, gh follows the fork convention and defaults the
+          # PR base repo to the parent (symbol/product) — `gh pr create` then fails with
+          # "Resource not accessible by integration (createPullRequest)" since this workflow's token
+          # has no write access to the parent. Pin every gh call to this repo.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
@@ -64,7 +70,10 @@ jobs:
             # clean merge — always publish the merge commit (it records the upstream parent so the
             # next run's `merge-base --is-ancestor` fast-path becomes true). Do NOT skip on a
             # tree-identical merge: that would drop the parent link and replay the same range forever.
-            git push -u origin "$SYNC_BRANCH" --force-with-lease
+            # Plain --force (not --force-with-lease): on a re-run the sync branch can already exist on
+            # origin while this runner never fetched it (checkout pulls only `dev`), so there is no
+            # lease ref to compare and --force-with-lease would fail. The branch is automation-owned.
+            git push -u --force origin "$SYNC_BRANCH"
 
             if [ -n "$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[].number')" ]; then
               echo "PR already open for $SYNC_BRANCH."
