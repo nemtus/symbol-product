@@ -43,7 +43,9 @@ the shoestring/lightapi package names are the `nemtus-*` names; `PackageResolver
 2. fast-path no-op if `dev` already contains every upstream commit;
 3. otherwise merges upstream into a `sync/upstream-<sha>` branch:
    - **clean merge** → opens a PR;
-   - **conflict** → aborts and files a tracking issue listing the conflicting files for manual resolution.
+   - **conflict** → aborts the merge and **fails the run**, writing the conflicting files and the local
+     resolution steps to the run's job summary. (This repo is an Issues-disabled fork, so the conflict
+     is signalled by the red run + summary rather than a tracking issue.)
 
 The sync PR is opened by `github-actions[bot]` (the built-in `GITHUB_TOKEN`), so its `ci.yml` runs start
 in an approval-required state: click **"Approve workflows to run"** in the PR merge box to run
