@@ -2,7 +2,7 @@ import { fetchAccountPage } from './accounts';
 import { fetchBlockPage } from './blocks';
 import { fetchNodeList } from './nodes';
 import config from '@/config';
-import { transactionChartFilterToType, truncateDecimals } from '@/utils/common';
+import { formatTransactionsPerBlock, transactionChartFilterToType, truncateDecimals } from '@/utils/common';
 import { createApiUrl, makeRequest } from '@/utils/server';
 
 export const fetchAccountStats = async () => {
@@ -64,7 +64,7 @@ export const fetchTransactionStats = async () => {
 	const stats = await makeRequest(createApiUrl('transaction/statistics'));
 	const blocks = (await fetchBlockPage({ pageSize: 240 })).data;
 	const total240Blocks = blocks.reduce((partialSum, block) => partialSum + block.transactionCount, 0);
-	const averagePerBlock = Math.ceil(total240Blocks / blocks.length);
+	const averagePerBlock = blocks.length ? formatTransactionsPerBlock(total240Blocks / blocks.length) : 0;
 
 	return {
 		averagePerBlock,
@@ -113,14 +113,14 @@ export const fetchNodeStats = async () => {
 
 export const fetchMarketData = async () => {
 	const response = await makeRequest(config.MARKET_DATA_URL);
-	const data = response.RAW.XEM.USD;
+	const data = response[0];
 
 	return {
-		price: data.PRICE,
-		priceChange: data.CHANGEPCTDAY,
-		volume: data.VOLUME24HOUR,
-		circulatingSupply: data.CIRCULATINGSUPPLY,
-		marketCap: data.MKTCAP,
+		price: data.current_price,
+		priceChange: data.price_change_percentage_24h,
+		volume: data.total_volume,
+		circulatingSupply: data.circulating_supply,
+		marketCap: data.market_cap,
 		treasury: 0
 	};
 };
