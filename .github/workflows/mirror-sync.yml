@@ -4,10 +4,19 @@ name: Mirror sync (upstream symbol/product)
 # mirror regenerable by a patch), this repo carries real code edits (the NEMTUS mirror layer),
 # so upstream arrives via a git MERGE:
 #   - clean merge  -> push a sync branch and open a PR (merge with a MERGE COMMIT, not squash)
-#   - conflict     -> abort and file a tracking issue listing the conflicts for manual resolution
+#   - conflict     -> abort, write the conflict list + resolution steps to the job summary, and
+#     fail the run (Issues are disabled on this fork; the red run + Discord notify is the signal)
 # The ci.yml `parity` job re-checks the mirror invariants before any sync PR can merge.
 # Note: the `_symbol` submodule (symbol/symbol, for linters/build-ci) is a SEPARATE sync owned
 # by the existing Jenkins updateSubmodule job — not handled here. See docs/nemtus-mirror.md.
+#
+# Companion jobs:
+#   - `keepalive` resets GitHub's 60-day scheduled-workflow auto-disable clock for every
+#     scheduled workflow in this repo (incl. the upstream-derived codeql/combine files,
+#     which are deliberately NOT edited). To stop a schedule permanently, DELETE its cron
+#     trigger — a manual "disable workflow" would just be re-enabled by the next keepalive.
+#   - `notify` pings Discord (org secret DISCORD_WEBHOOK_URL) when a scheduled run fails
+#     (e.g. the conflict path above); it skips silently when the secret is not configured.
 
 'on':
   schedule:
@@ -18,11 +27,6 @@ concurrency:
   group: mirror-sync
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  pull-requests: write
-  issues: write
-
 env:
   UPSTREAM_REMOTE: https://github.com/symbol/product.git
   UPSTREAM_BRANCH: dev
@@ -31,6 +35,9 @@ env:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - name: Checkout dev
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -133,3 +140,39 @@ jobs:
             echo "::error::Upstream sync conflict with symbol/product@${UPSTREAM_SHA}; see the job summary for the conflicting files and resolution steps."
             exit 1
           fi
+
+  # Reset GitHub's 60-day scheduled-workflow auto-disable clock. Covers every
+  # scheduled workflow in this repo — including the upstream-derived
+  # codeql-analysis.yaml / combine-dependabot-pr.yaml, which are kept unedited to
+  # avoid a permanent merge-conflict surface with upstream.
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Re-enable scheduled workflows (60-day inactivity guard)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for wf in mirror-sync.yml codeql-analysis.yaml combine-dependabot-pr.yaml; do
+            gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/enable"
+          done
+
+  # Push-notification on failure — the conflict path exits 1 by design, and a red
+  # scheduled run used to be the only signal. No third-party action: plain curl.
+  notify:
+    needs: [sync]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Notify Discord (mirror-sync failed)
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -z "${WEBHOOK}" ]; then
+            echo "DISCORD_WEBHOOK_URL not configured; skipping notification."
+            exit 0
+          fi
+          payload="$(jq -n --arg c "[mirror-sync] ${GITHUB_REPOSITORY} failed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{content: $c}')"
+          curl -fsS -H 'Content-Type: application/json' -d "${payload}" "${WEBHOOK}"
