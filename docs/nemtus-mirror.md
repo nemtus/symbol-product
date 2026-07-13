@@ -57,6 +57,29 @@ in an approval-required state: click **"Approve workflows to run"** in the PR me
 After resolving any conflict, keep the NEMTUS mirror layer (above) and ensure
 `check-nemtus-mirror-invariants.sh` passes before merging.
 
+Conflicts here are structural, not accidental: the mirror layer permanently rewrites a few packaging
+files (`lightapi/python/setup.cfg`, `tools/shoestring/pyproject.toml`, `PackageResolver.py`, …), so any
+upstream edit to them — most often a version bump — collides with the NEMTUS edit. They cannot be
+eliminated (a rename mirror must diverge on `name`/deps); the goal is to resolve them quickly and safely.
+Two aids:
+
+- **Helper script** — do the mechanical part (add the `upstream` remote, fetch, create the
+  `sync/upstream-<sha>` branch, attempt the merge) and, on conflict, print the conflicting files, their
+  hunks, and the exact resolution/PR steps. The merge is left in progress for you to edit:
+
+  ```bash
+  git checkout dev && git pull
+  bash .github/scripts/resolve-upstream-sync.sh
+  ```
+
+- **`git rerere`** — enable it once so git records each conflict resolution and replays it automatically
+  on the next structurally-identical conflict (e.g. the recurring version-bump conflict in `setup.cfg`).
+  A typical resolution is "keep the NEMTUS metadata, adopt upstream's version":
+
+  ```bash
+  git config rerere.enabled true
+  ```
+
 The `_symbol` submodule (`symbol/symbol`, used only for linters/build-ci) is a **separate** sync, owned by
 the existing Jenkins `updateSubmodule` job — not handled by `mirror-sync.yml`.
 

@@ -111,6 +111,10 @@ jobs:
             # summary and fail the run — the red run (with this summary) is the signal to resolve the
             # merge manually. Nothing here depends on Issues or labels.
             CONFLICTS="$(git diff --name-only --diff-filter=U | sort)"
+            # Capture the actual conflict hunks (combined diff, with markers) BEFORE aborting — after
+            # `git merge --abort` they are gone. Cap the size so a large conflict can't blow the 1 MiB
+            # job-summary limit; the truncation notice below fires when we hit the cap.
+            CONFLICT_DIFF="$(git diff --diff-filter=U | head -c 60000)"
             git merge --abort
 
             {
@@ -123,7 +127,19 @@ jobs:
               echo "${CONFLICTS}"
               echo '```'
               echo
+              echo "### Conflict hunks"
+              echo '```diff'
+              echo "${CONFLICT_DIFF}"
+              [ "${#CONFLICT_DIFF}" -ge 60000 ] && echo "... (truncated; run the helper below to see the full diff locally)"
+              echo '```'
+              echo
               echo "### Resolve locally (merge commit, not squash)"
+              echo "Fastest path — the helper does the mechanical steps and prints the conflict + next steps:"
+              echo '```bash'
+              echo "git checkout ${LOCAL_BRANCH} && git pull"
+              echo "bash .github/scripts/resolve-upstream-sync.sh   # adds upstream, merges, leaves conflicts to resolve"
+              echo '```'
+              echo "Or by hand:"
               echo '```bash'
               echo "git checkout ${LOCAL_BRANCH} && git pull"
               echo "git remote add upstream ${UPSTREAM_REMOTE} 2>/dev/null || true"
