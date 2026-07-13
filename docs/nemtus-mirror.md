@@ -15,6 +15,7 @@ package names.
 | Python deps | `symbol-sdk-python` (pulls `catparser`) | `nemtus-symbol-sdk` (import `symbolchain`; pulls `nemtus-catparser` transitively) |
 | Node images | `symbolplatform/symbol-server`, `symbolplatform/symbol-rest` | `ghcr.io/nemtus/catapult-server`, `ghcr.io/nemtus/symbol-rest` |
 | Network config source | `symbol/symbol` releases + `symbol/networks` | branch archives of [`nemtus/symbol-networks`](https://github.com/nemtus/symbol-networks) (`main` / `test-sai`) |
+| `_symbol` submodule (linters/jenkins, CI+dev only) | `symbol/symbol` | **[`nemtus/symbol`](https://github.com/nemtus/symbol)** (merge-based mirror; only the fetch URL is NEMTUS — the pinned SHA still tracks upstream) |
 
 The image names are not hardcoded in shoestring; they come from the `shoestring.ini [images]` inside the
 network-config package served by `nemtus/symbol-networks` (see that repo's `docs/contract.md`).
@@ -32,8 +33,9 @@ bash .github/scripts/check-nemtus-mirror-invariants.sh
 
 This asserts: shoestring depends on the `nemtus-*` mirrors (not `symbol-sdk-python` / `symbol-lightapi`);
 the shoestring/lightapi package names are the `nemtus-*` names; `PackageResolver.py` resolves from
-`nemtus/symbol-networks` and no longer uses the upstream Release-API / `OFFICIAL_HASHES` path; and no
-`symbolplatform/` image leaks into shoestring source. The `parity` job in `ci.yml` runs it on every PR.
+`nemtus/symbol-networks` and no longer uses the upstream Release-API / `OFFICIAL_HASHES` path; no
+`symbolplatform/` image leaks into shoestring source; and the `_symbol` submodule fetches from
+`nemtus/symbol`. The `parity` job in `ci.yml` runs it on every PR.
 
 ## Following upstream
 
@@ -80,8 +82,15 @@ Two aids:
   git config rerere.enabled true
   ```
 
-The `_symbol` submodule (`symbol/symbol`, used only for linters/build-ci) is a **separate** sync, owned by
-the existing Jenkins `updateSubmodule` job — not handled by `mirror-sync.yml`.
+The `_symbol` submodule (linters + jenkins config, sparse-checked-out by `init.sh`; consumed only by
+Jenkins CI and local dev — **not** by GitHub Actions `ci.yml` nor by the published packages) **fetches from
+the NEMTUS mirror [`nemtus/symbol`](https://github.com/nemtus/symbol)** instead of upstream `symbol/symbol`,
+so an upstream outage cannot break dev/CI tooling (invariant #6 above). Only the fetch URL is NEMTUS: the
+recorded pointer SHA still tracks upstream and is bumped by the merges arriving via `mirror-sync` and by the
+existing Jenkins `updateSubmodule` job. Because `nemtus/symbol` is a **merge-based** mirror, every upstream
+SHA the pointer references is preserved there as an ancestor; keep `nemtus/symbol`'s mirror-sync current (it
+runs daily — ahead of this repo's weekly sync) so the referenced SHA always exists before it lands here. An
+already-initialized clone picks up the URL change on the next `init.sh` (which now runs `git submodule sync`).
 
 ## CI
 

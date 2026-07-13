@@ -1,4 +1,9 @@
 [submodule "_symbol"]
 	path = _symbol
-	url = https://github.com/symbol/symbol.git
+	# NEMTUS mirror layer: fetch from the NEMTUS mirror of symbol/symbol, not upstream directly, so an
+	# upstream outage cannot break init.sh / linters / Jenkins CI. nemtus/symbol is a merge-based mirror,
+	# so every symbol/symbol commit this submodule points at is preserved there as an ancestor. The
+	# recorded pointer SHA still tracks upstream (bumped by mirror-sync); only the fetch URL is NEMTUS.
+	# See docs/nemtus-mirror.md.
+	url = https://github.com/nemtus/symbol.git
 	branch = dev
