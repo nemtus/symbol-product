@@ -23,6 +23,7 @@ SHOESTRING_PYPROJECT='tools/shoestring/pyproject.toml'
 PACKAGE_RESOLVER='tools/shoestring/shoestring/internal/PackageResolver.py'
 LIGHTAPI_SETUP='lightapi/python/setup.cfg'
 SAMPLE_INI='tools/shoestring/tests/resources/sai.shoestring.ini'
+GITMODULES='.gitmodules'
 
 # 1. shoestring depends on the NEMTUS PyPI mirrors, not the upstream packages.
 if grep -qE '^nemtus-symbol-sdk' "${SHOESTRING_REQ}" && grep -qE '^nemtus-symbol-lightapi' "${SHOESTRING_REQ}"; then
@@ -70,6 +71,20 @@ if [ -n "${leak}" ]; then
 	fail "symbolplatform/ image reference found in: ${leak}"
 else
 	ok "no symbolplatform/ image references in shoestring source or ${SAMPLE_INI}"
+fi
+
+# 6. The _symbol submodule (jenkins/linters, consumed by init.sh + Jenkins CI) fetches from the NEMTUS
+#    mirror nemtus/symbol, not upstream symbol/symbol, so an upstream outage cannot break dev/CI tooling.
+#    (Only the fetch URL is NEMTUS; the recorded pointer SHA still tracks upstream via mirror-sync.)
+if grep -qE '^[[:space:]]*url = https://github\.com/nemtus/symbol\.git' "${GITMODULES}"; then
+	ok "${GITMODULES} _symbol submodule fetches from nemtus/symbol"
+else
+	fail "${GITMODULES} _symbol submodule must fetch from https://github.com/nemtus/symbol.git"
+fi
+if grep -qE '^[[:space:]]*url = https://github\.com/symbol/symbol\.git' "${GITMODULES}"; then
+	fail "${GITMODULES} still points the _symbol submodule at upstream symbol/symbol"
+else
+	ok "${GITMODULES} has no upstream symbol/symbol submodule url"
 fi
 
 echo

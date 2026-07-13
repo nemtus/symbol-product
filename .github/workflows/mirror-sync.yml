@@ -7,8 +7,9 @@ name: Mirror sync (upstream symbol/product)
 #   - conflict     -> abort, write the conflict list + resolution steps to the job summary, and
 #     fail the run (Issues are disabled on this fork; the red run + Discord notify is the signal)
 # The ci.yml `parity` job re-checks the mirror invariants before any sync PR can merge.
-# Note: the `_symbol` submodule (symbol/symbol, for linters/build-ci) is a SEPARATE sync owned
-# by the existing Jenkins updateSubmodule job — not handled here. See docs/nemtus-mirror.md.
+# Note: the `_symbol` submodule (linters/build-ci) fetches from the NEMTUS mirror nemtus/symbol (not
+# upstream symbol/symbol); its pointer SHA is a SEPARATE sync owned by the existing Jenkins
+# updateSubmodule job — not handled here. See docs/nemtus-mirror.md.
 #
 # Companion jobs:
 #   - `keepalive` resets GitHub's 60-day scheduled-workflow auto-disable clock for every
