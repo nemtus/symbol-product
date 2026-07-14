@@ -39,7 +39,7 @@ the shoestring/lightapi package names are the `nemtus-*` names; `PackageResolver
 
 ## Following upstream
 
-`mirror-sync.yml` (weekly + manual `workflow_dispatch`) tracks `symbol/product:dev`:
+`mirror-sync.yml` (daily 04:17 UTC + manual `workflow_dispatch`) tracks `symbol/product:dev`:
 
 1. fetches `upstream` (`https://github.com/symbol/product.git`);
 2. fast-path no-op if `dev` already contains every upstream commit;
@@ -89,7 +89,8 @@ so an upstream outage cannot break dev/CI tooling (invariant #6 above). Only the
 recorded pointer SHA still tracks upstream and is bumped by the merges arriving via `mirror-sync` and by the
 existing Jenkins `updateSubmodule` job. Because `nemtus/symbol` is a **merge-based** mirror, every upstream
 SHA the pointer references is preserved there as an ancestor; keep `nemtus/symbol`'s mirror-sync current (it
-runs daily — ahead of this repo's weekly sync) so the referenced SHA always exists before it lands here. An
+runs daily at 03:17 UTC — ahead of this repo's daily 04:17 sync) so the referenced SHA always exists before
+it lands here. An
 already-initialized clone picks up the URL change on the next `init.sh` (which now runs `git submodule sync`).
 
 ## CI
