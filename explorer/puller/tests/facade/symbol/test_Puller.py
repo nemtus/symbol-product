@@ -10,6 +10,14 @@ from puller.facade.SymbolPuller import SymbolPuller
 from .puller_test_utils import NODE_URL, ResponseConnector, create_db_config, create_symbol_puller, temporary_symbol_puller
 
 
+class CountingRateLimiter:
+	def __init__(self):
+		self.call_count = 0
+
+	async def wait_for_turn(self):
+		self.call_count += 1
+
+
 class SymbolPullerTest(TestCase):
 
 	def test_create_default_puller_instance(self):
@@ -131,6 +139,45 @@ class SymbolPullerTest(TestCase):
 		self.assertEqual({'ok': True}, result)
 		connector.post.assert_awaited_once_with('path', {'payload': 1}, 'data', False)
 
+	def test_get_symbol_node_waits_for_rate_limiter_turn(self):
+		# Arrange:
+		connector = ResponseConnector({'chain/info': {'ok': True}})
+		rate_limiter = CountingRateLimiter()
+		with temporary_symbol_puller(connector=connector, rate_limiter=rate_limiter) as puller:
+			# Act:
+			asyncio.run(puller.get_symbol_node('/chain/info'))
+
+		# Assert:
+		self.assertEqual(1, rate_limiter.call_count)
+
+	def test_post_symbol_node_waits_for_rate_limiter_turn(self):
+		# Arrange:
+		connector = MagicMock()
+		connector.post = AsyncMock(return_value={'ok': True})
+		rate_limiter = CountingRateLimiter()
+		with temporary_symbol_puller(connector=connector, rate_limiter=rate_limiter) as puller:
+			# Act:
+			asyncio.run(puller.post_symbol_node('/transactions', {'payload': 'ABCD'}))
+
+		# Assert:
+		self.assertEqual(1, rate_limiter.call_count)
+
+	def test_get_symbol_node_waits_for_rate_limiter_turn_on_each_retry(self):
+		# Arrange:
+		connector = MagicMock()
+		connector.get = AsyncMock(side_effect=[
+			NodeException('Connection refused'),
+			{'ok': True}
+		])
+		rate_limiter = CountingRateLimiter()
+		with temporary_symbol_puller(connector=connector, rate_limiter=rate_limiter) as puller:
+			# Act:
+			result = asyncio.run(puller.get_symbol_node('/chain/info'))
+
+		# Assert:
+		self.assertEqual({'ok': True}, result)
+		self.assertEqual(2, rate_limiter.call_count)
+
 	def test_post_symbol_node_retries_api_error_response(self):
 		# Arrange:
 		connector = MagicMock()
@@ -203,6 +250,42 @@ class SymbolPullerTest(TestCase):
 			result
 		)
 		self.assertEqual(2, connector.get.await_count)
+
+	def test_get_symbol_node_retries_non_not_found_api_error_when_not_found_is_allowed(self):
+		# Arrange:
+		connector = MagicMock()
+		connector.get = AsyncMock(side_effect=[
+			{
+				'code': 'InvalidArgument',
+				'message': 'offset has an invalid format'
+			},
+			{'data': []}
+		])
+		with temporary_symbol_puller(connector=connector) as puller:
+			# Act:
+			result = asyncio.run(puller.get_symbol_node(
+				'/blocks?pageSize=100&offset=bad&orderBy=height',
+				not_found_as_error=False
+			))
+
+		# Assert:
+		self.assertEqual({'data': []}, result)
+		self.assertEqual(2, connector.get.await_count)
+
+	def test_get_symbol_node_does_not_retry_resource_not_found_when_not_found_is_allowed(self):
+		# Arrange:
+		connector = MagicMock()
+		connector.get = AsyncMock(return_value={
+			'code': 'ResourceNotFound',
+			'message': 'no resource exists with id foo'
+		})
+		with temporary_symbol_puller(connector=connector) as puller:
+			# Act:
+			result = asyncio.run(puller.get_symbol_node('/account/foo/multisig', not_found_as_error=False))
+
+		# Assert:
+		self.assertEqual({'code': 'ResourceNotFound', 'message': 'no resource exists with id foo'}, result)
+		self.assertEqual(1, connector.get.await_count)
 
 	def test_symbol_node_path_must_be_relative(self):
 		# Arrange:
