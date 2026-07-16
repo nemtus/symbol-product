@@ -236,7 +236,9 @@ class NemDatabase(DatabaseConnection):
 				deadline timestamp NOT NULL,
 				signature bytea,
 				is_inner boolean NOT NULL,
-				payload jsonb
+				payload jsonb,
+				size int NOT NULL,
+				version int NOT NULL
 			)
 			'''
 		)
@@ -406,6 +408,26 @@ class NemDatabase(DatabaseConnection):
 		results = cursor.fetchall()
 
 		return [AccountRefreshRecord(record[0], Address(record[1])) for record in results]
+
+	@staticmethod
+	def get_mosaic_levy_recipients(cursor, namespace_names):
+		"""Gets levy recipient addresses for mosaics."""
+
+		if not namespace_names:
+			return []
+
+		cursor.execute(
+			'''
+			SELECT levy_recipient
+			FROM mosaics
+			WHERE namespace_name = ANY(%s)
+				AND levy_recipient IS NOT NULL
+			''',
+			(list(namespace_names),)
+		)
+		results = cursor.fetchall()
+
+		return [Address(record[0]) for record in results]
 
 	@staticmethod
 	def upsert_account(cursor, account_info):
@@ -629,9 +651,11 @@ class NemDatabase(DatabaseConnection):
 				deadline,
 				signature,
 				is_inner,
-				payload
+				payload,
+				size,
+				version
 			)
-			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 			RETURNING id
 			''',
 			(
@@ -646,7 +670,9 @@ class NemDatabase(DatabaseConnection):
 				transaction.deadline,
 				unhexlify(transaction.signature) if transaction.signature else None,
 				transaction.is_inner,
-				json.dumps(transaction.payload) if transaction.payload else None
+				json.dumps(transaction.payload) if transaction.payload else None,
+				transaction.size,
+				transaction.version
 			)
 		)
 
