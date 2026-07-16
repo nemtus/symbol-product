@@ -81,7 +81,9 @@ TransactionRecord = namedtuple('TransactionRecord', [
 	'is_inner',
 	'sender_address',
 	'recipient_address',
-	'payload'
+	'payload',
+	'size',
+	'version'
 ])
 DatabaseConfig = namedtuple('DatabaseConfig', ['database', 'user', 'password', 'host', 'port'])
 
@@ -165,10 +167,11 @@ class NemPuller:
 
 		return self.nem_facade.network.public_key_to_address(PublicKey(public_key))
 
-	def _extract_addresses_from_block(self, block):
+	def _extract_addresses_from_block(self, cursor, block):
 		"""Extract address and public key from block and transactions."""
 
 		addresses = set()
+		transferred_mosaic_names = set()  # track transferred mosaic names for levy recipient lookup
 
 		public_key_fields = ['sender', 'remote_account', 'creator']
 		address_fields = ['recipient', 'rental_fee_sink', 'creation_fee_sink']
@@ -191,6 +194,11 @@ class NemPuller:
 			if levy:
 				addresses.add(str(Address(levy.recipient)))
 
+			if transaction.transaction_type == TransactionType.TRANSFER.value and transaction.mosaics:
+				for mosaic in transaction.mosaics:
+					if mosaic.namespace_name != 'nem.xem':
+						transferred_mosaic_names.add(mosaic.namespace_name)
+
 			# Handle multisig signatures
 			if hasattr(transaction, 'signatures'):
 				for signature in transaction.signatures:
@@ -211,6 +219,9 @@ class NemPuller:
 
 			if hasattr(transaction, 'other_transaction'):
 				_extract_from_transaction(transaction.other_transaction)
+
+		for recipient in self.nem_db.get_mosaic_levy_recipients(cursor, transferred_mosaic_names):
+			addresses.add(str(recipient))
 
 		return addresses
 
@@ -507,7 +518,9 @@ class NemPuller:
 			is_inner=is_inner,
 			sender_address=self._convert_public_key_to_address(transaction.sender),
 			recipient_address=recipient_address,
-			payload=payload
+			payload=payload,
+			size=transaction.size,
+			version=transaction.version
 		)
 
 	def _process_transaction(self, cursor, transaction, block_height, is_inner):
@@ -572,7 +585,7 @@ class NemPuller:
 
 		self._process_block(cursor, nemesis_block)
 
-		addresses = self._extract_addresses_from_block(nemesis_block)
+		addresses = self._extract_addresses_from_block(cursor, nemesis_block)
 		await self._process_account_batch(cursor, {address: nemesis_block.height for address in addresses})
 
 		self._process_transactions(cursor, nemesis_block.transactions, nemesis_block.height)
@@ -611,7 +624,7 @@ class NemPuller:
 			processed += 1
 
 			# Extract addresses for account processing
-			addresses = self._extract_addresses_from_block(block)
+			addresses = self._extract_addresses_from_block(cursor, block)
 			self._add_pending_addresses(pending_addresses, addresses, block.height)
 
 			# Track beneficiary harvested fees
