@@ -11,10 +11,26 @@ from psycopg2.extras import Json
 from symbolchain.sc import ReceiptType
 from symbolchain.symbol.Network import Network
 
-from puller.db.SymbolDatabase import SymbolDatabase
+from puller.db.SymbolDatabase import RollbackRefreshEntries, SymbolDatabase
 from puller.model.symbol.Account import create_account_row
+from puller.model.symbol.Lock import create_hash_lock_key, create_secret_lock_search_key
 from tests.facade.symbol.puller_test_utils import NATIVE_MOSAIC_ID, create_account_item
-from tests.test.SymbolMosaicTestUtils import create_expected_mosaic_row, create_mosaic_item, fetch_mosaic_state
+from tests.test.SymbolDatabaseTestUtils import fetch_full_block_state, fetch_normalized_sync_state
+from tests.test.SymbolMetadataTestUtils import (
+	SCOPED_METADATA_KEY,
+	SOURCE_ADDRESS,
+	TARGET_ADDRESS,
+	create_expected_metadata_row,
+	create_metadata_item,
+	fetch_metadata_rows,
+	find_metadata_row
+)
+from tests.test.SymbolMosaicTestUtils import (
+	create_expected_mosaic_row,
+	create_mosaic_item,
+	create_persisted_mosaic_state,
+	fetch_mosaic_state
+)
 from tests.test.SymbolNamespaceTestUtils import (
 	NAMESPACE_ROOT_ID,
 	NAMESPACE_SUB_ID,
@@ -33,6 +49,50 @@ ADDRESS1 = '9889432DE263BB8FE88444A4DA28D3609BD8BB8FAE18AE95'
 ADDRESS2 = '9889432DE263BB8FE88444A4DA28D3609BD8BB8FAE18AE96'
 ADDRESS3 = '9889432DE263BB8FE88444A4DA28D3609BD8BB8FAE18AE97'
 ADDRESS4 = '98' + '11' * 23
+LOCK_HASH = bytes.fromhex('AA' * 32)
+LOCK_HASH_2 = bytes.fromhex('BB' * 32)
+LOCK_SECRET = bytes.fromhex('CC' * 32)
+LOCK_COMPOSITE_HASH = bytes.fromhex('DD' * 32)
+LOCK_COMPOSITE_HASH_2 = bytes.fromhex('EE' * 32)
+LOCK_OWNER = bytes.fromhex(ADDRESS1)
+LOCK_OWNER_2 = bytes.fromhex(ADDRESS2)
+LOCK_RECIPIENT = bytes.fromhex(ADDRESS3)
+
+
+def _create_hash_lock_row(observed_height=1, lock_hash=LOCK_HASH, end_height=100, status='unused'):
+	return {
+		'hash': lock_hash,
+		'owner_address': LOCK_OWNER,
+		'mosaic_id': NATIVE_MOSAIC_ID,
+		'amount': 1234,
+		'end_height': end_height,
+		'status': status,
+		'raw_payload': {'lock': {'hash': lock_hash.hex()}},
+		'updated_at_height': observed_height
+	}
+
+
+def _create_secret_lock_row(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+	observed_height=1,
+	composite_hash=LOCK_COMPOSITE_HASH,
+	owner_address=LOCK_OWNER,
+	secret=LOCK_SECRET,
+	end_height=100,
+	status='unused'
+):
+	return {
+		'composite_hash': composite_hash,
+		'owner_address': owner_address,
+		'recipient_address': LOCK_RECIPIENT,
+		'secret': secret,
+		'hash_algorithm': 'hash160',
+		'mosaic_id': NATIVE_MOSAIC_ID,
+		'amount': 1234,
+		'end_height': end_height,
+		'status': status,
+		'raw_payload': {'lock': {'compositeHash': composite_hash.hex()}},
+		'updated_at_height': observed_height
+	}
 
 
 def _create_block(height, block_hash=None, **overrides):
@@ -180,12 +240,6 @@ def _create_alias_name_rows(namespace_row):
 		})
 
 	return rows
-
-
-def _fetch_block_state(database):
-	cursor = database.connection.cursor()
-	cursor.execute('SELECT * FROM symbol_blocks ORDER BY height')
-	return cursor.fetchall()
 
 
 class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
@@ -491,6 +545,103 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 			WHERE table_name = 'symbol_mosaics' AND column_name = 'alias_names'
 			''')
 		self.assertEqual([('NO', "'[]'::jsonb")], cursor.fetchall())
+
+	def test_create_tables_creates_symbol_metadata_columns(self):
+		# Arrange:
+		database = self._create_uninitialized_database()
+		cursor = database.connection.cursor()
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		cursor.execute(
+			'''
+			SELECT column_name, udt_name, is_nullable, character_maximum_length
+			FROM information_schema.columns
+			WHERE table_name = 'symbol_metadata'
+			ORDER BY ordinal_position
+			''')
+		self.assertEqual([
+			('composite_hash', 'bytea', 'NO', None),
+			('metadata_type', 'symbol_metadata_type', 'NO', None),
+			('scoped_metadata_key', 'varchar', 'NO', None),
+			('source_address', 'bytea', 'NO', None),
+			('target_address', 'bytea', 'YES', None),
+			('target_id', 'varchar', 'YES', 16),
+			('value_hex', 'text', 'NO', None),
+			('value_utf8', 'text', 'NO', None),
+			('raw_payload', 'jsonb', 'NO', None),
+			('updated_at_height', 'int8', 'NO', None)
+		], cursor.fetchall())
+
+	def test_create_tables_creates_symbol_metadata_enum(self):
+		# Arrange:
+		database = self._create_uninitialized_database()
+		cursor = database.connection.cursor()
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		cursor.execute(
+			'''
+			SELECT pg_type.typname, enumlabel
+			FROM pg_enum
+			JOIN pg_type ON pg_type.oid = pg_enum.enumtypid
+			WHERE pg_type.typname = 'symbol_metadata_type'
+			ORDER BY enumsortorder
+			''')
+		self.assertEqual([
+			('symbol_metadata_type', 'account'),
+			('symbol_metadata_type', 'mosaic'),
+			('symbol_metadata_type', 'namespace')
+		], cursor.fetchall())
+
+	def test_create_tables_creates_symbol_metadata_indexes(self):
+		# Arrange:
+		database = self._create_uninitialized_database()
+		cursor = database.connection.cursor()
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		cursor.execute(
+			'''
+			SELECT indexname, indexdef
+			FROM pg_indexes
+			WHERE schemaname = 'public' AND tablename = 'symbol_metadata'
+			ORDER BY indexname
+			''')
+		self.assertEqual([
+			(
+				'idx_symbol_metadata_scoped_key',
+				'CREATE INDEX idx_symbol_metadata_scoped_key ON public.symbol_metadata USING btree (scoped_metadata_key)'
+			),
+			(
+				'idx_symbol_metadata_source',
+				'CREATE INDEX idx_symbol_metadata_source ON public.symbol_metadata USING btree (source_address)'
+			),
+			(
+				'idx_symbol_metadata_target_address_height',
+				'CREATE INDEX idx_symbol_metadata_target_address_height ON public.symbol_metadata '
+				'USING btree (target_address, updated_at_height DESC)'
+			),
+			(
+				'idx_symbol_metadata_target_id',
+				'CREATE INDEX idx_symbol_metadata_target_id ON public.symbol_metadata USING btree (target_id)'
+			),
+			(
+				'idx_symbol_metadata_type',
+				'CREATE INDEX idx_symbol_metadata_type ON public.symbol_metadata USING btree (metadata_type)'
+			),
+			(
+				'idx_symbol_metadata_updated_height',
+				'CREATE INDEX idx_symbol_metadata_updated_height ON public.symbol_metadata USING btree (updated_at_height)'
+			),
+			('symbol_metadata_pkey', 'CREATE UNIQUE INDEX symbol_metadata_pkey ON public.symbol_metadata USING btree (composite_hash)')
+		], cursor.fetchall())
 
 	def test_upsert_namespace_persists_fresh_namespace_and_full_alias_row_set(self):
 		# Arrange:
@@ -1035,6 +1186,181 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 		# Assert:
 		self.assertEqual(valid_row['mosaic_id'], fetch_mosaic_state(database)[0].mosaic_id)
 
+	def test_upsert_metadata_persists_fresh_insert_as_a_full_row(self):
+		# Arrange:
+		database = self._create_database()
+		item = create_metadata_item(metadata_type=1, target_id='72C0212E67A08BCE')
+		row = create_expected_metadata_row(
+			item, 123, composite_hash=bytes.fromhex('11' * 32), metadata_type='mosaic',
+			target_id='72C0212E67A08BCE', value_utf8='hello')
+
+		# Act:
+		database.upsert_metadata(row)
+
+		# Assert:
+		self.assertEqual(row, find_metadata_row(database, row['composite_hash']))
+
+	def test_upsert_metadata_updates_all_non_key_columns_for_same_composite_hash(self):
+		# Arrange:
+		database = self._create_database()
+		original_item = create_metadata_item(metadata_type=1, target_id='72C0212E67A08BCE')
+		database.upsert_metadata(create_expected_metadata_row(
+			original_item, 123, composite_hash=bytes.fromhex('11' * 32), metadata_type='mosaic',
+			target_id='72C0212E67A08BCE', value_utf8='hello'))
+		updated_item = create_metadata_item(
+			metadata_type=2,
+			scoped_metadata_key='0102030405060708',
+			source_address='12' * 24,
+			target_address='13' * 24,
+			target_id='A95F1F8A96159516',
+			value='776F726C64',
+			composite_hash='11' * 32,
+			item_id='updated-metadata-item-id')
+		updated_row = create_expected_metadata_row(
+			updated_item, 456, composite_hash=bytes.fromhex('11' * 32), metadata_type='namespace',
+			scoped_metadata_key='0102030405060708', source_address=bytes.fromhex('12' * 24),
+			target_address=bytes.fromhex('13' * 24), target_id='A95F1F8A96159516', value_hex='776F726C64',
+			value_utf8='world')
+
+		# Act:
+		database.upsert_metadata(updated_row)
+
+		# Assert:
+		self.assertEqual(updated_row, find_metadata_row(database, updated_row['composite_hash']))
+
+	def test_upsert_metadata_failed_update_preserves_existing_row(self):
+		# Arrange:
+		database = self._create_database()
+		original_item = create_metadata_item(metadata_type=1, target_id='72C0212E67A08BCE')
+		original_row = create_expected_metadata_row(
+			original_item, 123, composite_hash=bytes.fromhex('11' * 32), metadata_type='mosaic',
+			target_id='72C0212E67A08BCE', value_utf8='hello')
+		database.upsert_metadata(original_row)
+		invalid_row = {**original_row, 'value_utf8': None}
+
+		# Act:
+		with self.assertRaises(PsycopgError):
+			database.upsert_metadata(invalid_row)
+
+		# Assert:
+		self.assertEqual(original_row, find_metadata_row(database, original_row['composite_hash']))
+
+	def test_upsert_metadata_keeps_connection_usable_after_failed_update(self):
+		# Arrange:
+		database = self._create_database()
+		original_item = create_metadata_item(metadata_type=1, target_id='72C0212E67A08BCE')
+		original_row = create_expected_metadata_row(
+			original_item, 123, composite_hash=bytes.fromhex('11' * 32), metadata_type='mosaic',
+			target_id='72C0212E67A08BCE', value_utf8='hello')
+		database.upsert_metadata(original_row)
+		invalid_row = {**original_row, 'value_utf8': None}
+		updated_row = {
+			**original_row,
+			'value_hex': '776F726C64',
+			'value_utf8': 'world',
+			'updated_at_height': 456
+		}
+
+		# Act:
+		with self.assertRaises(PsycopgError):
+			database.upsert_metadata(invalid_row)
+		database.upsert_metadata(updated_row)
+
+		# Assert:
+		self.assertEqual(updated_row, find_metadata_row(database, original_row['composite_hash']))
+
+	def test_delete_metadata_by_key_deletes_only_the_exact_null_target_id_key(self):
+		# Arrange:
+		database = self._create_database()
+		common_item = create_metadata_item(
+			metadata_type=0,
+			composite_hash='11' * 32,
+			target_id='0000000000000000')
+		null_target_row = create_expected_metadata_row(
+			common_item, 123, composite_hash=bytes.fromhex('11' * 32), metadata_type='account',
+			target_id=None, value_utf8='hello')
+		value_target_row = {**null_target_row, 'composite_hash': bytes.fromhex('22' * 32), 'target_id': '0000000000000001'}
+		database.upsert_metadata(null_target_row)
+		database.upsert_metadata(value_target_row)
+		metadata_key = {
+			'metadata_type': 'account',
+			'source_address': null_target_row['source_address'],
+			'target_address': null_target_row['target_address'],
+			'scoped_metadata_key': null_target_row['scoped_metadata_key'],
+			'target_id': None
+		}
+
+		# Act:
+		database.delete_metadata_by_key(metadata_key)
+
+		# Assert:
+		self.assertIsNone(find_metadata_row(database, null_target_row['composite_hash']))
+		self.assertEqual(value_target_row, find_metadata_row(database, value_target_row['composite_hash']))
+
+	def test_delete_metadata_by_key_is_noop_for_missing_natural_key(self):
+		# Arrange:
+		database = self._create_database()
+		item = create_metadata_item(metadata_type=1, target_id='72C0212E67A08BCE')
+		row = create_expected_metadata_row(
+			item, 123, composite_hash=bytes.fromhex('11' * 32), metadata_type='mosaic',
+			target_id='72C0212E67A08BCE', value_utf8='hello')
+		database.upsert_metadata(row)
+		missing_key = {
+			'metadata_type': row['metadata_type'],
+			'source_address': row['source_address'],
+			'target_address': row['target_address'],
+			'scoped_metadata_key': 'FFFFFFFFFFFFFFFF',
+			'target_id': row['target_id']
+		}
+
+		# Act:
+		database.delete_metadata_by_key(missing_key)
+
+		# Assert:
+		self.assertEqual(row, find_metadata_row(database, row['composite_hash']))
+
+	def test_get_metadata_keys_updated_from_height_returns_exact_keys_in_composite_hash_order(self):
+		# Arrange:
+		database = self._create_database()
+		rows = [
+			(create_metadata_item(
+				metadata_type=1, composite_hash='33' * 32, target_id='72C0212E67A08BCE',
+				scoped_metadata_key='0000000000000003'), 3, {
+				'composite_hash': bytes.fromhex('33' * 32), 'metadata_type': 'mosaic',
+				'scoped_metadata_key': '0000000000000003', 'source_address': bytes.fromhex(SOURCE_ADDRESS),
+				'target_address': bytes.fromhex(TARGET_ADDRESS), 'target_id': '72C0212E67A08BCE',
+				'value_hex': '68656C6C6F', 'value_utf8': 'hello'}),
+			(create_metadata_item(
+				metadata_type=2, composite_hash='11' * 32, target_id='A95F1F8A96159516',
+				scoped_metadata_key='0000000000000004'), 4, {
+				'composite_hash': bytes.fromhex('11' * 32), 'metadata_type': 'namespace',
+				'scoped_metadata_key': '0000000000000004', 'source_address': bytes.fromhex(SOURCE_ADDRESS),
+				'target_address': bytes.fromhex(TARGET_ADDRESS), 'target_id': 'A95F1F8A96159516',
+				'value_hex': '68656C6C6F', 'value_utf8': 'hello'}),
+			(create_metadata_item(metadata_type=0, composite_hash='22' * 32, scoped_metadata_key='0000000000000005'), 5, {
+				'composite_hash': bytes.fromhex('22' * 32), 'metadata_type': 'account',
+				'scoped_metadata_key': '0000000000000005', 'source_address': bytes.fromhex(SOURCE_ADDRESS),
+				'target_address': bytes.fromhex(TARGET_ADDRESS), 'target_id': None,
+				'value_hex': '68656C6C6F', 'value_utf8': 'hello'})
+		]
+		for item, height, normalized_row in rows:
+			database.upsert_metadata(create_expected_metadata_row(
+				item, height, **normalized_row))
+
+		# Act:
+		keys = database.get_metadata_keys_updated_from_height(4)
+
+		# Assert:
+		expected_keys = [
+			{'metadata_type': 'namespace', 'source_address': bytes.fromhex(SOURCE_ADDRESS),
+				'target_address': bytes.fromhex(TARGET_ADDRESS), 'scoped_metadata_key': '0000000000000004',
+				'target_id': 'A95F1F8A96159516'},
+			{'metadata_type': 'account', 'source_address': bytes.fromhex(SOURCE_ADDRESS),
+				'target_address': bytes.fromhex(TARGET_ADDRESS), 'scoped_metadata_key': '0000000000000005',
+				'target_id': None}
+		]
+		self.assertEqual(expected_keys, keys)
+
 	def test_upsert_namespace_refreshes_existing_mosaic_alias_names(self):
 		# Arrange:
 		database = self._create_database()
@@ -1182,7 +1508,7 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 		database.repair_rollback_from_height(2, _create_sync_state(
 			status='repairing',
 			last_synced_height=1,
-			last_synced_block_hash=b'hash 1'), [], [])
+			last_synced_block_hash=b'hash 1'), RollbackRefreshEntries())
 
 		# Assert:
 		cursor = database.connection.cursor()
@@ -1208,16 +1534,16 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 		database.repair_rollback_from_height(
 			fork_height,
 			_create_sync_state(status='repairing', last_synced_height=1, last_synced_block_hash=b'hash 1'),
-			[],
-			[])
+			RollbackRefreshEntries())
 
 		# Assert:
 		self.assertEqual(original_mosaic_state, fetch_mosaic_state(database))
 
-	def test_repair_rollback_from_height_applies_namespace_and_mosaic_changes_in_same_transaction(self):
+	def test_repair_rollback_from_height_applies_namespace_mosaic_and_metadata_changes_in_same_transaction(self):
 		# Arrange:
 		database = self._create_database()
 		database.upsert_blocks([_create_block(1), _create_block(2)])
+		database.upsert_sync_state(_create_sync_state())
 		refreshed_row = _create_namespace_row()
 		deleted_row = _create_namespace_row('B95F1F8A96159516', 'orphaned', 2)
 		database.upsert_namespace(refreshed_row, _create_alias_name_rows(refreshed_row))
@@ -1226,50 +1552,157 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 		deleted_mosaic_id = '0000000000000002'
 		database.upsert_mosaic(create_expected_mosaic_row(create_mosaic_item(mosaic_id=mosaic_id), 2))
 		database.upsert_mosaic(create_expected_mosaic_row(create_mosaic_item(mosaic_id=deleted_mosaic_id), 2))
+		metadata_item = create_metadata_item(
+			metadata_type=1,
+			composite_hash='11' * 32,
+			target_id='72C0212E67A08BCE')
+		deleted_metadata_item = create_metadata_item(
+			metadata_type=2,
+			composite_hash='22' * 32,
+			target_id='A95F1F8A96159516')
+		database.upsert_metadata(create_expected_metadata_row(
+			metadata_item, 2, composite_hash=bytes.fromhex('11' * 32), metadata_type='mosaic',
+			target_id='72C0212E67A08BCE', value_utf8='hello'))
+		database.upsert_metadata(create_expected_metadata_row(
+			deleted_metadata_item, 2, composite_hash=bytes.fromhex('22' * 32), metadata_type='namespace',
+			target_id='A95F1F8A96159516', value_utf8='hello'))
 		refreshed_row = _create_namespace_row(
 			alias_type='none',
 			alias_mosaic_id=None,
 			end_height=100,
 			observed_height=1)
-
-		# Act:
-		database.repair_rollback_from_height(2, _create_sync_state(
+		refresh_entries = RollbackRefreshEntries(
+			[
+				{'row': refreshed_row, 'alias_rows': _create_alias_name_rows(refreshed_row)},
+				{'namespace_id': deleted_row['namespace_id']}
+			],
+			[
+				{'row': create_expected_mosaic_row(create_mosaic_item(mosaic_id=mosaic_id, supply='99'), 1)},
+				{'mosaic_id': deleted_mosaic_id}
+			],
+			[
+				{'row': create_expected_metadata_row(
+					create_metadata_item(
+						metadata_type=1,
+						composite_hash='11' * 32,
+						target_id='72C0212E67A08BCE',
+						value='776F726C64',
+						item_id='refreshed-metadata-item'),
+					1, composite_hash=bytes.fromhex('11' * 32), metadata_type='mosaic',
+					target_id='72C0212E67A08BCE', value_hex='776F726C64', value_utf8='world')},
+				{'key': {
+					'metadata_type': 'namespace',
+					'source_address': bytes.fromhex(SOURCE_ADDRESS),
+					'target_address': bytes.fromhex(TARGET_ADDRESS),
+					'scoped_metadata_key': SCOPED_METADATA_KEY,
+					'target_id': 'A95F1F8A96159516'
+				}}
+			])
+		refreshed_metadata_row = refresh_entries.metadata_entries[0]['row']
+		expected_sync_state = _create_sync_state(
 			status='repairing',
 			last_synced_height=1,
-			last_synced_block_hash=b'hash 1'), [
-			{'row': refreshed_row, 'alias_rows': _create_alias_name_rows(refreshed_row)},
-			{'namespace_id': deleted_row['namespace_id']}
-		], [
-			{'row': create_expected_mosaic_row(create_mosaic_item(mosaic_id=mosaic_id, supply='99'), 1)},
-			{'mosaic_id': deleted_mosaic_id}
-		])
+			last_synced_block_hash=b'hash 1')
+		expected_mosaic_row = refresh_entries.mosaic_entries[0]['row']
+		expected_mosaic_state = [create_persisted_mosaic_state(expected_mosaic_row, [])]
+		expected_namespace_state = (
+			[
+				(
+					NAMESPACE_ROOT_ID, None, NAMESPACE_ROOT_ID, 'root', 'root', 1, 'root',
+					ADDRESS1.lower(), 1, 100, 'none', None, None,
+					{'namespace': {'level0': NAMESPACE_ROOT_ID}}, 1
+				)
+			],
+			[('namespace', NAMESPACE_ROOT_ID, 'root', 1)]
+		)
+
+		# Act:
+		database.repair_rollback_from_height(2, expected_sync_state, refresh_entries)
 
 		# Assert:
+		self.assertEqual(expected_namespace_state, fetch_namespace_state(database.connection))
+		self.assertEqual(expected_mosaic_state, fetch_mosaic_state(database))
+		self.assertEqual([refreshed_metadata_row], fetch_metadata_rows(database))
+		self.assertEqual(expected_sync_state, fetch_normalized_sync_state(database))
 		cursor = database.connection.cursor()
-		cursor.execute(
-			'''
-			SELECT namespace_id, parent_id, root_id, name, full_name, depth, registration_type,
-				encode(owner_address, 'hex'), start_height, end_height, alias_type, alias_mosaic_id,
-				encode(alias_address, 'hex'), raw_payload, updated_at_height
-			FROM symbol_namespaces
-			ORDER BY namespace_id
-			''')
-		self.assertEqual([(
-			NAMESPACE_ROOT_ID, None, NAMESPACE_ROOT_ID, 'root', 'root', 1, 'root',
-			ADDRESS1.lower(), 1, 100, 'none', None, None,
-			{'namespace': {'level0': NAMESPACE_ROOT_ID}}, 1
-		)], cursor.fetchall())
-		cursor.execute(
-			'SELECT artifact_type, artifact_id, name, updated_at_height FROM symbol_alias_names ORDER BY artifact_type, artifact_id, name')
-		self.assertEqual([
-			('namespace', NAMESPACE_ROOT_ID, 'root', 1)
-		], cursor.fetchall())
-		cursor.execute('SELECT mosaic_id, supply, updated_at_height FROM symbol_mosaics ORDER BY mosaic_id')
-		self.assertEqual([(mosaic_id, 99, 1)], cursor.fetchall())
 		cursor.execute('SELECT height FROM symbol_blocks ORDER BY height')
 		self.assertEqual([(1,)], cursor.fetchall())
-		self.assertEqual('repairing', database.get_sync_state()['status'])
-		self.assertEqual(1, database.get_sync_state()['last_synced_height'])
+
+	def test_repair_rollback_rolls_back_namespace_mosaic_metadata_and_chain_state_after_metadata_failure(self):
+		# pylint: disable=too-many-locals
+
+		# Arrange:
+		database = self._create_database()
+		database.upsert_blocks([_create_block(1), _create_block(2)])
+		database.upsert_sync_state(_create_sync_state())
+		original_namespace_row = _create_namespace_row(observed_height=2)
+		deleted_namespace_row = _create_namespace_row('B95F1F8A96159516', 'gone', 2)
+		database.upsert_namespace(original_namespace_row, _create_alias_name_rows(original_namespace_row))
+		database.upsert_namespace(deleted_namespace_row, _create_alias_name_rows(deleted_namespace_row))
+		original_mosaic_row = create_expected_mosaic_row(create_mosaic_item(mosaic_id='0000000000000001'), 2)
+		deleted_mosaic_row = create_expected_mosaic_row(create_mosaic_item(mosaic_id='0000000000000002'), 2)
+		database.upsert_mosaic(original_mosaic_row)
+		database.upsert_mosaic(deleted_mosaic_row)
+		original_metadata_item = create_metadata_item(metadata_type=1, composite_hash='11' * 32, target_id='72C0212E67A08BCE')
+		deleted_metadata_item = create_metadata_item(metadata_type=2, composite_hash='22' * 32, target_id='A95F1F8A96159516')
+		original_metadata_row = create_expected_metadata_row(
+			original_metadata_item, 2, composite_hash=bytes.fromhex('11' * 32), metadata_type='mosaic',
+			target_id='72C0212E67A08BCE', value_utf8='hello')
+		deleted_metadata_row = create_expected_metadata_row(
+			deleted_metadata_item, 2, composite_hash=bytes.fromhex('22' * 32), metadata_type='namespace',
+			target_id='A95F1F8A96159516', value_utf8='hello')
+		database.upsert_metadata(original_metadata_row)
+		database.upsert_metadata(deleted_metadata_row)
+		original_state = {
+			'blocks': fetch_full_block_state(database),
+			'sync_state': fetch_normalized_sync_state(database),
+			'namespace': fetch_namespace_state(database.connection),
+			'mosaic': fetch_mosaic_state(database),
+			'metadata': fetch_metadata_rows(database)
+		}
+		self.assertEqual(2, len(original_state['namespace'][0]))
+		self.assertEqual(2, len(original_state['mosaic']))
+		self.assertEqual(2, len(original_state['metadata']))
+		updated_namespace_row = _create_namespace_row(
+			alias_type='none', alias_mosaic_id=None, end_height=100, observed_height=1,
+			raw_payload={'namespace': {'state': 'updated'}})
+		updated_mosaic_row = create_expected_mosaic_row(
+			create_mosaic_item(mosaic_id='0000000000000001', supply='99'), 1)
+		updated_metadata_item = create_metadata_item(
+			metadata_type=1,
+			composite_hash='11' * 32,
+			target_id='72C0212E67A08BCE',
+			value='776F726C64',
+			item_id='updated-metadata-item')
+		updated_metadata_row = create_expected_metadata_row(
+			updated_metadata_item, 1, composite_hash=bytes.fromhex('11' * 32), metadata_type='mosaic',
+			target_id='72C0212E67A08BCE', value_hex='776F726C64', value_utf8='world')
+		invalid_metadata_row = {**updated_metadata_row, 'composite_hash': bytes.fromhex('33' * 32), 'value_utf8': None}
+		refresh_entries = RollbackRefreshEntries(
+			[
+				{'row': updated_namespace_row, 'alias_rows': _create_alias_name_rows(updated_namespace_row)},
+				{'namespace_id': deleted_namespace_row['namespace_id']}
+			],
+			[
+				{'row': updated_mosaic_row},
+				{'mosaic_id': deleted_mosaic_row['mosaic_id']}
+			],
+			[
+				{'row': updated_metadata_row},
+				{'row': invalid_metadata_row}
+			])
+
+		# Act:
+		with self.assertRaises(PsycopgError):
+			database.repair_rollback_from_height(2, _create_sync_state(
+				status='repairing', last_synced_height=1, last_synced_block_hash=b'hash 1'), refresh_entries)
+
+		# Assert:
+		self.assertEqual(original_state['blocks'], fetch_full_block_state(database))
+		self.assertEqual(original_state['sync_state'], fetch_normalized_sync_state(database))
+		self.assertEqual(original_state['namespace'], fetch_namespace_state(database.connection))
+		self.assertEqual(original_state['mosaic'], fetch_mosaic_state(database))
+		self.assertEqual(original_state['metadata'], fetch_metadata_rows(database))
 
 	def test_repair_rollback_rolls_back_namespace_entries_and_chain_state_when_later_alias_insert_fails(self):
 		# Arrange:
@@ -1287,13 +1720,8 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 			raw_payload={'namespace': {'state': 'updated'}},
 			observed_height=1)
 		invalid_row = _create_namespace_row(NAMESPACE_SUB_ID, 'invalid', 1)
-
-		# Act:
-		with self.assertRaises(PsycopgError):
-			database.repair_rollback_from_height(2, _create_sync_state(
-				status='repairing',
-				last_synced_height=1,
-				last_synced_block_hash=b'hash 1'), [
+		refresh_entries = RollbackRefreshEntries(
+			[
 				{'row': updated_row, 'alias_rows': _create_alias_name_rows(updated_row)},
 				{'namespace_id': deleted_row['namespace_id']},
 				{'row': invalid_row, 'alias_rows': [{
@@ -1302,7 +1730,16 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 					'name': 'invalid',
 					'updated_at_height': 1
 				}]}
-			], [])
+			],
+			[],
+			[])
+
+		# Act:
+		with self.assertRaises(PsycopgError):
+			database.repair_rollback_from_height(2, _create_sync_state(
+				status='repairing',
+				last_synced_height=1,
+				last_synced_block_hash=b'hash 1'), refresh_entries)
 
 		# Assert:
 		cursor = database.connection.cursor()
@@ -1367,10 +1804,13 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 			'symbol_accounts',
 			'symbol_alias_names',
 			'symbol_blocks',
+			'symbol_hash_locks',
+			'symbol_metadata',
 			'symbol_mosaics',
 			'symbol_multisig',
 			'symbol_namespaces',
 			'symbol_receipts',
+			'symbol_secret_locks',
 			'symbol_sync_state',
 			'symbol_transaction_addresses',
 			'symbol_transaction_mosaics',
@@ -2919,7 +3359,8 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 		})
 
 		# Act:
-		database.repair_rollback_from_height(10, _create_sync_state(status='repairing', last_synced_height=9), [], [])
+		database.repair_rollback_from_height(
+			10, _create_sync_state(status='repairing', last_synced_height=9), RollbackRefreshEntries())
 
 		# Assert:
 		self.assertEqual('stale', database.get_account_refresh_state()['status'])
@@ -2934,7 +3375,8 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 		})
 
 		# Act:
-		database.repair_rollback_from_height(10, _create_sync_state(status='repairing', last_synced_height=9), [], [])
+		database.repair_rollback_from_height(
+			10, _create_sync_state(status='repairing', last_synced_height=9), RollbackRefreshEntries())
 
 		# Assert:
 		self.assertEqual('healthy', database.get_account_refresh_state()['status'])
@@ -2968,7 +3410,7 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 			10))
 		original_namespace_state = fetch_namespace_state(database.connection)
 		original_mosaic_state = fetch_mosaic_state(database)
-		original_block_state = _fetch_block_state(database)
+		original_block_state = fetch_full_block_state(database)
 		original_refresh_state = database.get_account_refresh_state()
 		refreshed_row = _create_namespace_row(
 			alias_mosaic_id='mosaic-refreshed',
@@ -2983,16 +3425,16 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 
 		# Act:
 		with self.assertRaises(PsycopgError):
-			database.repair_rollback_from_height(10, _create_sync_state(status='repairing', last_synced_height=9), [
+			database.repair_rollback_from_height(10, _create_sync_state(status='repairing', last_synced_height=9), RollbackRefreshEntries([
 				{'row': refreshed_row, 'alias_rows': _create_alias_name_rows(refreshed_row)},
 				{'namespace_id': deleted_row['namespace_id']}
 			], [
 				{'row': refreshed_mosaic_row},
 				{'mosaic_id': 'mosaic-gone'}
-			])
+			], []))
 
 		# Assert:
-		self.assertEqual(original_block_state, _fetch_block_state(database))
+		self.assertEqual(original_block_state, fetch_full_block_state(database))
 		self.assertEqual(original_refresh_state, database.get_account_refresh_state())
 		self.assertEqual(original_namespace_state, fetch_namespace_state(database.connection))
 		self.assertEqual(original_mosaic_state, fetch_mosaic_state(database))
@@ -3018,7 +3460,8 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 		database.finalize_account_refresh('run-1', NATIVE_MOSAIC_ID, 10, datetime.datetime(2026, 1, 1))
 
 		# Act:
-		database.repair_rollback_from_height(10, _create_sync_state(status='repairing', last_synced_height=9), [], [])
+		database.repair_rollback_from_height(
+			10, _create_sync_state(status='repairing', last_synced_height=9), RollbackRefreshEntries())
 
 		# Assert:
 		expected_address = bytes.fromhex(ADDRESS1)
@@ -3571,7 +4014,7 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 			status='repairing',
 			last_synced_height=1,
 			last_synced_block_hash=b'hash 1'
-		), [], [])
+		), RollbackRefreshEntries())
 
 		# Assert:
 		cursor = database.connection.cursor()
@@ -3611,3 +4054,711 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 			bytes(b'hash 1'),
 			bytes(sync_state['last_synced_block_hash'])
 		)
+
+	def test_create_tables_creates_exact_hash_lock_columns_types_and_nullability(self):
+		# Arrange:
+		database = self._create_uninitialized_database()
+		cursor = database.connection.cursor()
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		cursor.execute(
+			'''
+			SELECT table_name, column_name, udt_name, is_nullable, character_maximum_length
+			FROM information_schema.columns
+			WHERE table_name = 'symbol_hash_locks'
+			ORDER BY ordinal_position
+			''')
+		self.assertEqual([
+			('symbol_hash_locks', 'hash', 'bytea', 'NO', None),
+			('symbol_hash_locks', 'owner_address', 'bytea', 'NO', None),
+			('symbol_hash_locks', 'mosaic_id', 'varchar', 'NO', 16),
+			('symbol_hash_locks', 'amount', 'int8', 'NO', None),
+			('symbol_hash_locks', 'end_height', 'int8', 'NO', None),
+			('symbol_hash_locks', 'status', 'symbol_lock_status', 'NO', None),
+			('symbol_hash_locks', 'raw_payload', 'jsonb', 'NO', None),
+			('symbol_hash_locks', 'updated_at_height', 'int8', 'NO', None)
+		], cursor.fetchall())
+
+	def test_create_tables_creates_exact_hash_lock_primary_key_constraint(self):
+		# Arrange:
+		database = self._create_uninitialized_database()
+		cursor = database.connection.cursor()
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		cursor.execute(
+			'''
+			SELECT table_constraints.constraint_type, key_column_usage.column_name
+			FROM information_schema.table_constraints AS table_constraints
+			JOIN information_schema.key_column_usage AS key_column_usage
+				USING (constraint_catalog, constraint_schema, constraint_name)
+			WHERE table_constraints.table_name = 'symbol_hash_locks'
+				AND table_constraints.constraint_type = 'PRIMARY KEY'
+			ORDER BY key_column_usage.ordinal_position
+			''')
+		self.assertEqual([('PRIMARY KEY', 'hash')], cursor.fetchall())
+
+	def test_create_tables_creates_exact_hash_lock_index_set(self):
+		# Arrange:
+		database = self._create_uninitialized_database()
+		cursor = database.connection.cursor()
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		cursor.execute(
+			'''
+			SELECT indexname, indexdef
+			FROM pg_indexes
+			WHERE tablename = 'symbol_hash_locks'
+			ORDER BY indexname
+			''')
+		self.assertEqual([
+			('idx_symbol_hash_locks_end_height',
+				'CREATE INDEX idx_symbol_hash_locks_end_height ON public.symbol_hash_locks '
+				'USING btree (end_height DESC, hash DESC)'),
+			('idx_symbol_hash_locks_mosaic_end_height',
+				'CREATE INDEX idx_symbol_hash_locks_mosaic_end_height ON public.symbol_hash_locks '
+				'USING btree (mosaic_id, end_height DESC, hash DESC)'),
+			('idx_symbol_hash_locks_owner_end_height',
+				'CREATE INDEX idx_symbol_hash_locks_owner_end_height ON public.symbol_hash_locks '
+				'USING btree (owner_address, end_height DESC, hash DESC)'),
+			('idx_symbol_hash_locks_status_end_height',
+				'CREATE INDEX idx_symbol_hash_locks_status_end_height ON public.symbol_hash_locks '
+				'USING btree (status, end_height DESC, hash DESC)'),
+			('idx_symbol_hash_locks_updated_at_height',
+				'CREATE INDEX idx_symbol_hash_locks_updated_at_height ON public.symbol_hash_locks '
+				'USING btree (updated_at_height)'),
+			('symbol_hash_locks_pkey',
+				'CREATE UNIQUE INDEX symbol_hash_locks_pkey ON public.symbol_hash_locks USING btree (hash)')
+		], cursor.fetchall())
+
+	def test_create_tables_creates_exact_secret_lock_columns_types_and_nullability(self):
+		# Arrange:
+		database = self._create_uninitialized_database()
+		cursor = database.connection.cursor()
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		cursor.execute(
+			'''
+			SELECT table_name, column_name, udt_name, is_nullable, character_maximum_length
+			FROM information_schema.columns
+			WHERE table_name = 'symbol_secret_locks'
+			ORDER BY ordinal_position
+			''')
+		self.assertEqual([
+			('symbol_secret_locks', 'composite_hash', 'bytea', 'NO', None),
+			('symbol_secret_locks', 'owner_address', 'bytea', 'NO', None),
+			('symbol_secret_locks', 'recipient_address', 'bytea', 'NO', None),
+			('symbol_secret_locks', 'secret', 'bytea', 'NO', None),
+			('symbol_secret_locks', 'hash_algorithm', 'symbol_lock_hash_algorithm', 'NO', None),
+			('symbol_secret_locks', 'mosaic_id', 'varchar', 'NO', 16),
+			('symbol_secret_locks', 'amount', 'int8', 'NO', None),
+			('symbol_secret_locks', 'end_height', 'int8', 'NO', None),
+			('symbol_secret_locks', 'status', 'symbol_lock_status', 'NO', None),
+			('symbol_secret_locks', 'raw_payload', 'jsonb', 'NO', None),
+			('symbol_secret_locks', 'updated_at_height', 'int8', 'NO', None)
+		], cursor.fetchall())
+
+	def test_create_tables_creates_exact_secret_lock_primary_key_constraint(self):
+		# Arrange:
+		database = self._create_uninitialized_database()
+		cursor = database.connection.cursor()
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		cursor.execute(
+			'''
+			SELECT table_constraints.constraint_type, key_column_usage.column_name
+			FROM information_schema.table_constraints AS table_constraints
+			JOIN information_schema.key_column_usage AS key_column_usage
+				USING (constraint_catalog, constraint_schema, constraint_name)
+			WHERE table_constraints.table_name = 'symbol_secret_locks'
+				AND table_constraints.constraint_type = 'PRIMARY KEY'
+			ORDER BY key_column_usage.ordinal_position
+			''')
+		self.assertEqual([('PRIMARY KEY', 'composite_hash')], cursor.fetchall())
+
+	def test_create_tables_creates_exact_secret_lock_index_set(self):
+		# Arrange:
+		database = self._create_uninitialized_database()
+		cursor = database.connection.cursor()
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		cursor.execute(
+			'''
+			SELECT indexname, indexdef
+			FROM pg_indexes
+			WHERE tablename = 'symbol_secret_locks'
+			ORDER BY indexname
+			''')
+		self.assertEqual([
+			('idx_symbol_secret_locks_end_height',
+				'CREATE INDEX idx_symbol_secret_locks_end_height ON public.symbol_secret_locks '
+				'USING btree (end_height DESC, composite_hash DESC)'),
+			('idx_symbol_secret_locks_hash_algorithm_end_height',
+				'CREATE INDEX idx_symbol_secret_locks_hash_algorithm_end_height ON public.symbol_secret_locks '
+				'USING btree (hash_algorithm, end_height DESC, composite_hash DESC)'),
+			('idx_symbol_secret_locks_mosaic_end_height',
+				'CREATE INDEX idx_symbol_secret_locks_mosaic_end_height ON public.symbol_secret_locks '
+				'USING btree (mosaic_id, end_height DESC, composite_hash DESC)'),
+			('idx_symbol_secret_locks_owner_end_height',
+				'CREATE INDEX idx_symbol_secret_locks_owner_end_height ON public.symbol_secret_locks '
+				'USING btree (owner_address, end_height DESC, composite_hash DESC)'),
+			('idx_symbol_secret_locks_recipient_end_height',
+				'CREATE INDEX idx_symbol_secret_locks_recipient_end_height ON public.symbol_secret_locks '
+				'USING btree (recipient_address, end_height DESC, composite_hash DESC)'),
+			('idx_symbol_secret_locks_search',
+				'CREATE INDEX idx_symbol_secret_locks_search ON public.symbol_secret_locks '
+				'USING btree (secret, recipient_address, hash_algorithm, owner_address)'),
+			('idx_symbol_secret_locks_status_end_height',
+				'CREATE INDEX idx_symbol_secret_locks_status_end_height ON public.symbol_secret_locks '
+				'USING btree (status, end_height DESC, composite_hash DESC)'),
+			('idx_symbol_secret_locks_updated_at_height',
+				'CREATE INDEX idx_symbol_secret_locks_updated_at_height ON public.symbol_secret_locks '
+				'USING btree (updated_at_height)'),
+			('symbol_secret_locks_pkey',
+				'CREATE UNIQUE INDEX symbol_secret_locks_pkey ON public.symbol_secret_locks USING btree (composite_hash)')
+		], cursor.fetchall())
+
+	def test_create_tables_creates_exact_lock_enum_labels(self):
+		# Arrange:
+		database = self._create_uninitialized_database()
+		cursor = database.connection.cursor()
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		cursor.execute(
+			'''
+			SELECT pg_type.typname, enumlabel
+			FROM pg_enum
+			JOIN pg_type ON pg_type.oid = pg_enum.enumtypid
+			WHERE pg_type.typname IN ('symbol_lock_status', 'symbol_lock_hash_algorithm')
+			ORDER BY pg_type.typname, enumsortorder
+			''')
+		self.assertEqual([
+			('symbol_lock_hash_algorithm', 'sha3_256'),
+			('symbol_lock_hash_algorithm', 'hash160'),
+			('symbol_lock_hash_algorithm', 'hash256'),
+			('symbol_lock_status', 'unused'),
+			('symbol_lock_status', 'used')
+		], cursor.fetchall())
+
+	def test_create_tables_uses_lock_enum_types_for_lock_columns(self):
+		# Arrange:
+		database = self._create_uninitialized_database()
+		cursor = database.connection.cursor()
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		cursor.execute(
+			'''
+			SELECT table_name, column_name, udt_name
+			FROM information_schema.columns
+			WHERE table_name IN ('symbol_hash_locks', 'symbol_secret_locks')
+				AND column_name IN ('hash_algorithm', 'status')
+			ORDER BY table_name, column_name
+			''')
+		self.assertEqual([
+			('symbol_hash_locks', 'status', 'symbol_lock_status'),
+			('symbol_secret_locks', 'hash_algorithm', 'symbol_lock_hash_algorithm'),
+			('symbol_secret_locks', 'status', 'symbol_lock_status')
+		], cursor.fetchall())
+
+	def test_create_tables_does_not_add_lock_column_defaults(self):
+		# Arrange:
+		database = self._create_uninitialized_database()
+		cursor = database.connection.cursor()
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		cursor.execute(
+			'''
+			SELECT table_name, column_name, column_default
+			FROM information_schema.columns
+			WHERE table_name IN ('symbol_hash_locks', 'symbol_secret_locks')
+				AND column_default IS NOT NULL
+			ORDER BY table_name, ordinal_position
+			''')
+		self.assertEqual([], cursor.fetchall())
+
+	def test_create_tables_does_not_add_lock_foreign_keys(self):
+		# Arrange:
+		database = self._create_uninitialized_database()
+		cursor = database.connection.cursor()
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		cursor.execute(
+			'''
+			SELECT table_name, constraint_name
+			FROM information_schema.table_constraints
+			WHERE table_name IN ('symbol_hash_locks', 'symbol_secret_locks')
+				AND constraint_type = 'FOREIGN KEY'
+			ORDER BY table_name, constraint_name
+			''')
+		self.assertEqual([], cursor.fetchall())
+
+	def test_create_tables_does_not_add_lock_check_constraints(self):
+		# Arrange:
+		database = self._create_uninitialized_database()
+		cursor = database.connection.cursor()
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		cursor.execute(
+			'''
+			SELECT conrelid::regclass::text, pg_get_constraintdef(oid)
+			FROM pg_constraint
+			WHERE conrelid IN ('symbol_hash_locks'::regclass, 'symbol_secret_locks'::regclass)
+				AND contype = 'c'
+			ORDER BY conrelid::regclass::text, conname
+			''')
+		self.assertEqual([], cursor.fetchall())
+
+	def test_hash_lock_upsert_and_update_persist_current_state(self):
+		# Arrange:
+		database = self._create_database()
+		initial_row = _create_hash_lock_row()
+		updated_row = _create_hash_lock_row(observed_height=2, end_height=200, status='used')
+
+		# Act:
+		database.upsert_hash_lock(initial_row)
+		database.upsert_hash_lock(updated_row)
+		cursor = database.connection.cursor()
+		cursor.execute('SELECT hash, amount, end_height, status, updated_at_height FROM symbol_hash_locks')
+
+		# Assert:
+		self.assertEqual(
+			[(LOCK_HASH, 1234, 200, 'used', 2)],
+			[(bytes(lock_hash), amount, end_height, status, updated_at_height)
+				for lock_hash, amount, end_height, status, updated_at_height in cursor.fetchall()])
+
+	def test_delete_hash_lock_removes_current_state(self):
+		# Arrange:
+		database = self._create_database()
+		database.upsert_hash_lock(_create_hash_lock_row())
+
+		# Act:
+		database.delete_hash_lock(create_hash_lock_key(LOCK_HASH))
+
+		# Assert:
+		cursor = database.connection.cursor()
+		cursor.execute('SELECT hash FROM symbol_hash_locks')
+		self.assertEqual([], cursor.fetchall())
+
+	def test_secret_lock_replace_empty_removes_logical_key_and_preserves_siblings(self):
+		# Arrange:
+		database = self._create_database()
+		first_row = _create_secret_lock_row()
+		sibling_row = _create_secret_lock_row(composite_hash=LOCK_COMPOSITE_HASH_2, owner_address=LOCK_OWNER_2)
+		database.replace_secret_locks(
+			create_secret_lock_search_key(LOCK_OWNER, LOCK_RECIPIENT, LOCK_SECRET, 'hash160'),
+			[first_row, sibling_row])
+
+		# Act:
+		database.replace_secret_locks(
+			create_secret_lock_search_key(LOCK_OWNER, LOCK_RECIPIENT, LOCK_SECRET, 'hash160'), [])
+
+		# Assert:
+		cursor = database.connection.cursor()
+		cursor.execute('SELECT composite_hash, owner_address FROM symbol_secret_locks ORDER BY composite_hash')
+		self.assertEqual(
+			[(LOCK_COMPOSITE_HASH_2, LOCK_OWNER_2)],
+			[(bytes(composite_hash), bytes(owner_address)) for composite_hash, owner_address in cursor.fetchall()])
+
+	def test_secret_lock_unknown_owner_replace_removes_all_owner_siblings(self):
+		# Arrange:
+		database = self._create_database()
+		database.replace_secret_locks(
+			create_secret_lock_search_key(LOCK_OWNER, LOCK_RECIPIENT, LOCK_SECRET, 'hash160'),
+			[_create_secret_lock_row()])
+		database.replace_secret_locks(
+			create_secret_lock_search_key(LOCK_OWNER_2, LOCK_RECIPIENT, LOCK_SECRET, 'hash160'),
+			[_create_secret_lock_row(composite_hash=LOCK_COMPOSITE_HASH_2, owner_address=LOCK_OWNER_2)])
+
+		# Act:
+		database.replace_secret_locks(
+			create_secret_lock_search_key(None, LOCK_RECIPIENT, LOCK_SECRET, 'hash160'), [])
+
+		# Assert:
+		cursor = database.connection.cursor()
+		cursor.execute('SELECT composite_hash FROM symbol_secret_locks')
+		self.assertEqual([], cursor.fetchall())
+
+	def test_replace_secret_locks_rolls_back_delete_and_prior_insert_when_a_later_row_is_invalid(self):
+		# Arrange:
+		database = self._create_database()
+		key = create_secret_lock_search_key(LOCK_OWNER, LOCK_RECIPIENT, LOCK_SECRET, 'hash160')
+		initial_row = _create_secret_lock_row()
+		sibling_row = _create_secret_lock_row(composite_hash=LOCK_COMPOSITE_HASH_2, owner_address=LOCK_OWNER_2)
+		database.replace_secret_locks(key, [initial_row])
+		database.replace_secret_locks(
+			create_secret_lock_search_key(LOCK_OWNER_2, LOCK_RECIPIENT, LOCK_SECRET, 'hash160'), [sibling_row])
+		invalid_row = {**_create_secret_lock_row(composite_hash=b'\xFF' * 32), 'hash_algorithm': 'invalid'}
+
+		# Act / Assert:
+		with self.assertRaises(PsycopgError):
+			database.replace_secret_locks(key, [_create_secret_lock_row(status='used'), invalid_row])
+
+		# Assert:
+		cursor = database.connection.cursor()
+		cursor.execute('SELECT composite_hash, owner_address, status FROM symbol_secret_locks ORDER BY composite_hash')
+		self.assertEqual([
+			(LOCK_COMPOSITE_HASH, LOCK_OWNER, 'unused'),
+			(LOCK_COMPOSITE_HASH_2, LOCK_OWNER_2, 'unused')
+		], [
+			(bytes(composite_hash), bytes(owner_address), status)
+			for composite_hash, owner_address, status in cursor.fetchall()
+		])
+
+	def test_get_hash_lock_hashes_updated_from_height_rejects_an_out_of_band_invalid_hash_length(self):
+		# Arrange:
+		database = self._create_database()
+		row = _create_hash_lock_row(lock_hash=b'bad')
+		cursor = database.connection.cursor()
+		cursor.execute(
+			'''INSERT INTO symbol_hash_locks
+				(hash, owner_address, mosaic_id, amount, end_height, status, raw_payload, updated_at_height)
+				VALUES (%(hash)s, %(owner_address)s, %(mosaic_id)s, %(amount)s, %(end_height)s, %(status)s,
+				%(raw_payload)s, %(updated_at_height)s)''',
+			{**row, 'raw_payload': Json(row['raw_payload'])})
+		database.connection.commit()
+
+		# Act / Assert:
+		with self.assertRaisesRegex(ValueError, '^Invalid Symbol Hash Lock key$'):
+			database.get_hash_lock_hashes_updated_from_height(1)
+
+	def test_get_secret_lock_search_keys_updated_from_height_rejects_an_out_of_band_invalid_owner_length(self):
+		# Arrange:
+		database = self._create_database()
+		row = _create_secret_lock_row(owner_address=b'bad')
+		cursor = database.connection.cursor()
+		cursor.execute(
+			'''INSERT INTO symbol_secret_locks
+				(composite_hash, owner_address, recipient_address, secret, hash_algorithm, mosaic_id, amount, end_height,
+				status, raw_payload, updated_at_height)
+				VALUES (%(composite_hash)s, %(owner_address)s, %(recipient_address)s, %(secret)s, %(hash_algorithm)s,
+				%(mosaic_id)s, %(amount)s, %(end_height)s, %(status)s, %(raw_payload)s, %(updated_at_height)s)''',
+			{**row, 'raw_payload': Json(row['raw_payload'])})
+		database.connection.commit()
+
+		# Act / Assert:
+		with self.assertRaisesRegex(ValueError, '^Invalid Symbol Secret Lock owner address$'):
+			database.get_secret_lock_search_keys_updated_from_height(1)
+
+	def test_get_hash_lock_hashes_updated_from_height_returns_ordered_boundary_rows(self):
+		# Arrange:
+		database = self._create_database()
+		height_rows = (
+			(9, b'\x50' * 32),
+			(10, b'\x40' * 32),
+			(10, b'\x30' * 32),
+			(11, b'\x10' * 32),
+			(12, b'\x20' * 32),
+			(13, b'\x60' * 32)
+		)
+		for observed_height, lock_hash in height_rows:
+			database.upsert_hash_lock(_create_hash_lock_row(observed_height, lock_hash, end_height=1))
+
+		# Act:
+		keys = database.get_hash_lock_hashes_updated_from_height(10)
+
+		# Assert:
+		self.assertEqual([
+			b'\x30' * 32,
+			b'\x40' * 32,
+			b'\x10' * 32,
+			b'\x20' * 32,
+			b'\x60' * 32
+		], [key.hash for key in keys])
+
+	def test_get_hash_lock_hashes_reaching_finalized_height_returns_height_ordered_boundary_rows(self):
+		# Arrange:
+		database = self._create_database()
+		height_rows = (
+			(9, b'\x50' * 32),
+			(10, b'\x40' * 32),
+			(10, b'\x30' * 32),
+			(11, b'\x10' * 32),
+			(12, b'\x20' * 32),
+			(13, b'\x60' * 32)
+		)
+		for end_height, lock_hash in height_rows:
+			database.upsert_hash_lock(_create_hash_lock_row(observed_height=1, lock_hash=lock_hash, end_height=end_height))
+
+		# Act:
+		keys = database.get_hash_lock_hashes_reaching_finalized_height(12)
+
+		# Assert:
+		self.assertEqual([
+			b'\x50' * 32,
+			b'\x30' * 32,
+			b'\x40' * 32,
+			b'\x10' * 32,
+			b'\x20' * 32
+		], [key.hash for key in keys])
+
+	def test_get_secret_lock_search_keys_updated_from_height_returns_ordered_boundary_rows(self):
+		# Arrange:
+		database = self._create_database()
+		height_rows = (
+			(9, b'\x50' * 32, b'\x59' * 32),
+			(10, b'\x40' * 32, b'\x01' * 32),
+			(10, b'\x30' * 32, b'\x99' * 32),
+			(11, b'\x10' * 32, b'\x19' * 32),
+			(12, b'\x20' * 32, b'\x29' * 32),
+			(13, b'\x60' * 32, b'\x49' * 32)
+		)
+		for observed_height, composite_hash, secret in height_rows:
+			row = _create_secret_lock_row(observed_height, composite_hash, secret=secret, end_height=1)
+			database.replace_secret_locks(
+				create_secret_lock_search_key(LOCK_OWNER, LOCK_RECIPIENT, secret, 'hash160'), [row])
+
+		# Act:
+		keys = database.get_secret_lock_search_keys_updated_from_height(10)
+
+		# Assert:
+		self.assertEqual([
+			(LOCK_OWNER, LOCK_RECIPIENT, b'\x99' * 32, 'hash160'),
+			(LOCK_OWNER, LOCK_RECIPIENT, b'\x01' * 32, 'hash160'),
+			(LOCK_OWNER, LOCK_RECIPIENT, b'\x19' * 32, 'hash160'),
+			(LOCK_OWNER, LOCK_RECIPIENT, b'\x29' * 32, 'hash160'),
+			(LOCK_OWNER, LOCK_RECIPIENT, b'\x49' * 32, 'hash160')
+		], keys)
+
+	def test_get_secret_lock_search_keys_reaching_finalized_height_returns_height_ordered_boundary_rows(self):
+		# Arrange:
+		database = self._create_database()
+		height_rows = (
+			(9, b'\x50' * 32, b'\x59' * 32),
+			(10, b'\x40' * 32, b'\x01' * 32),
+			(10, b'\x30' * 32, b'\x99' * 32),
+			(11, b'\x10' * 32, b'\x19' * 32),
+			(12, b'\x20' * 32, b'\x29' * 32),
+			(13, b'\x60' * 32, b'\x49' * 32)
+		)
+		for end_height, composite_hash, secret in height_rows:
+			row = _create_secret_lock_row(observed_height=1, composite_hash=composite_hash, secret=secret, end_height=end_height)
+			database.replace_secret_locks(
+				create_secret_lock_search_key(LOCK_OWNER, LOCK_RECIPIENT, secret, 'hash160'), [row])
+
+		# Act:
+		keys = database.get_secret_lock_search_keys_reaching_finalized_height(12)
+
+		# Assert:
+		self.assertEqual([
+			(LOCK_OWNER, LOCK_RECIPIENT, b'\x59' * 32, 'hash160'),
+			(LOCK_OWNER, LOCK_RECIPIENT, b'\x99' * 32, 'hash160'),
+			(LOCK_OWNER, LOCK_RECIPIENT, b'\x01' * 32, 'hash160'),
+			(LOCK_OWNER, LOCK_RECIPIENT, b'\x19' * 32, 'hash160'),
+			(LOCK_OWNER, LOCK_RECIPIENT, b'\x29' * 32, 'hash160')
+		], keys)
+
+	def test_apply_finalization_lock_entries_rolls_back_hash_and_secret_writes_together(self):
+		# Arrange:
+		database = self._create_database()
+		database.upsert_hash_lock(_create_hash_lock_row(status='unused'))
+		secret_key = create_secret_lock_search_key(LOCK_OWNER, LOCK_RECIPIENT, LOCK_SECRET, 'hash160')
+		database.replace_secret_locks(secret_key, [_create_secret_lock_row(status='unused')])
+		invalid_secret_row = {**_create_secret_lock_row(status='used'), 'hash_algorithm': 'invalid'}
+
+		# Act / Assert:
+		with self.assertRaises(PsycopgError):
+			database.apply_finalization_lock_entries(
+				[{'row': _create_hash_lock_row(status='used')}],
+				[{'key': secret_key, 'rows': [invalid_secret_row]}])
+
+		# Assert:
+		cursor = database.connection.cursor()
+		cursor.execute('SELECT status FROM symbol_hash_locks WHERE hash = %s', (LOCK_HASH,))
+		self.assertEqual([('unused',)], cursor.fetchall())
+		cursor.execute('SELECT status FROM symbol_secret_locks WHERE composite_hash = %s', (LOCK_COMPOSITE_HASH,))
+		self.assertEqual([('unused',)], cursor.fetchall())
+
+	def test_repair_rollback_deletes_lock_rows_at_fork_and_applies_replacements_atomically(self):
+		# Arrange:
+		database = self._create_database()
+		kept_hash_row = _create_hash_lock_row(observed_height=1, lock_hash=LOCK_HASH)
+		orphaned_hash_row = _create_hash_lock_row(observed_height=2, lock_hash=LOCK_HASH_2)
+		kept_secret_row = _create_secret_lock_row(observed_height=1)
+		orphaned_secret_row = _create_secret_lock_row(observed_height=2, composite_hash=LOCK_COMPOSITE_HASH_2)
+		database.upsert_hash_lock(kept_hash_row)
+		database.upsert_hash_lock(orphaned_hash_row)
+		database.replace_secret_locks(
+			create_secret_lock_search_key(LOCK_OWNER, LOCK_RECIPIENT, LOCK_SECRET, 'hash160'), [kept_secret_row])
+		database.replace_secret_locks(
+			create_secret_lock_search_key(LOCK_OWNER_2, LOCK_RECIPIENT, LOCK_SECRET, 'hash160'), [orphaned_secret_row])
+		refreshed_hash_row = _create_hash_lock_row(observed_height=1, lock_hash=LOCK_HASH_2, status='used')
+		refreshed_secret_row = _create_secret_lock_row(
+			observed_height=1, composite_hash=LOCK_COMPOSITE_HASH_2, owner_address=LOCK_OWNER_2, status='used')
+		refresh_entries = RollbackRefreshEntries(
+			hash_lock_entries=[{'row': refreshed_hash_row}],
+			secret_lock_entries=[{
+				'key': create_secret_lock_search_key(LOCK_OWNER_2, LOCK_RECIPIENT, LOCK_SECRET, 'hash160'),
+				'rows': [refreshed_secret_row]
+			}])
+
+		# Act:
+		database.repair_rollback_from_height(
+			2,
+			_create_sync_state(status='repairing', last_synced_height=1, last_synced_block_hash=b'hash 1'),
+			refresh_entries)
+
+		# Assert:
+		cursor = database.connection.cursor()
+		cursor.execute('SELECT hash, status, updated_at_height FROM symbol_hash_locks ORDER BY hash')
+		self.assertEqual([
+			(LOCK_HASH, 'unused', 1),
+			(LOCK_HASH_2, 'used', 1)
+		], [
+			(bytes(lock_hash), status, updated_at_height)
+			for lock_hash, status, updated_at_height in cursor.fetchall()])
+		cursor.execute('SELECT composite_hash, status, updated_at_height FROM symbol_secret_locks ORDER BY composite_hash')
+		self.assertEqual([
+			(LOCK_COMPOSITE_HASH, 'unused', 1),
+			(LOCK_COMPOSITE_HASH_2, 'used', 1)
+		], [
+			(bytes(composite_hash), status, updated_at_height)
+			for composite_hash, status, updated_at_height in cursor.fetchall()])
+		self.assertEqual('repairing', database.get_sync_state()['status'])
+		self.assertEqual(1, database.get_sync_state()['last_synced_height'])
+
+	def test_repair_rollback_applies_hash_lock_delete_entries(self):
+		# Arrange:
+		database = self._create_database()
+		database.upsert_hash_lock(_create_hash_lock_row(observed_height=1))
+
+		# Act:
+		database.repair_rollback_from_height(
+			2,
+			_create_sync_state(status='repairing', last_synced_height=1, last_synced_block_hash=b'hash 1'),
+			RollbackRefreshEntries(hash_lock_entries=[{
+				'hash': create_hash_lock_key(LOCK_HASH)
+			}]))
+
+		# Assert:
+		cursor = database.connection.cursor()
+		cursor.execute('SELECT hash FROM symbol_hash_locks')
+		self.assertEqual([], cursor.fetchall())
+
+	def test_repair_rollback_applies_empty_secret_lock_replacement_and_preserves_siblings(self):
+		# Arrange:
+		database = self._create_database()
+		target_key = create_secret_lock_search_key(LOCK_OWNER, LOCK_RECIPIENT, LOCK_SECRET, 'hash160')
+		sibling_key = create_secret_lock_search_key(LOCK_OWNER_2, LOCK_RECIPIENT, LOCK_SECRET, 'hash160')
+		database.replace_secret_locks(target_key, [_create_secret_lock_row()])
+		database.replace_secret_locks(
+			sibling_key,
+			[_create_secret_lock_row(composite_hash=LOCK_COMPOSITE_HASH_2, owner_address=LOCK_OWNER_2)])
+
+		# Act:
+		database.repair_rollback_from_height(
+			2,
+			_create_sync_state(status='repairing', last_synced_height=1, last_synced_block_hash=b'hash 1'),
+			RollbackRefreshEntries(secret_lock_entries=[{
+				'key': target_key,
+				'rows': []
+			}]))
+
+		# Assert:
+		cursor = database.connection.cursor()
+		cursor.execute('SELECT composite_hash, owner_address FROM symbol_secret_locks ORDER BY composite_hash')
+		self.assertEqual(
+			[(LOCK_COMPOSITE_HASH_2, LOCK_OWNER_2)],
+			[(bytes(composite_hash), bytes(owner_address)) for composite_hash, owner_address in cursor.fetchall()])
+		self.assertEqual('repairing', database.get_sync_state()['status'])
+
+	def test_repair_rollback_restores_chain_and_lock_state_when_later_secret_lock_write_fails(self):  # pylint: disable=too-many-locals
+		# Arrange:
+		database = self._create_database()
+		database.upsert_blocks([_create_block(1), _create_block(2)])
+		database.upsert_sync_state(_create_sync_state())
+		original_namespace_row = _create_namespace_row(observed_height=2)
+		database.upsert_namespace(original_namespace_row, _create_alias_name_rows(original_namespace_row))
+		original_mosaic_row = create_expected_mosaic_row(create_mosaic_item(supply='1234'), 2)
+		database.upsert_mosaic(original_mosaic_row)
+		original_metadata_item = create_metadata_item(metadata_type=1, target_id='72C0212E67A08BCE')
+		original_metadata_row = create_expected_metadata_row(
+			original_metadata_item, 2, bytes.fromhex('11' * 32), 'mosaic', '72C0212E67A08BCE', 'hello')
+		database.upsert_metadata(original_metadata_row)
+		original_hash_row = _create_hash_lock_row(observed_height=2, status='unused')
+		original_secret_row = _create_secret_lock_row(observed_height=2, status='unused')
+		database.upsert_hash_lock(original_hash_row)
+		database.replace_secret_locks(
+			create_secret_lock_search_key(LOCK_OWNER, LOCK_RECIPIENT, LOCK_SECRET, 'hash160'), [original_secret_row])
+		original_blocks = fetch_full_block_state(database)
+		original_sync_state = fetch_normalized_sync_state(database)
+		original_namespace_state = fetch_namespace_state(database.connection)
+		original_mosaic_state = fetch_mosaic_state(database)
+		original_metadata_state = fetch_metadata_rows(database)
+		invalid_secret_row = {
+			**_create_secret_lock_row(observed_height=1, status='used'),
+			'hash_algorithm': 'invalid'
+		}
+		canonical_namespace_row = _create_namespace_row(full_name='canonical', observed_height=1)
+		refresh_entries = RollbackRefreshEntries(
+			namespace_entries=[{
+				'row': canonical_namespace_row,
+				'alias_rows': _create_alias_name_rows(canonical_namespace_row)
+			}],
+			mosaic_entries=[{
+				'row': create_expected_mosaic_row(create_mosaic_item(supply='9999'), 1)
+			}],
+			metadata_entries=[{
+				'row': create_expected_metadata_row(
+					create_metadata_item(metadata_type=1, target_id='72C0212E67A08BCE', value='776F726C64'),
+					1, bytes.fromhex('11' * 32), 'mosaic', '72C0212E67A08BCE', 'world', value_hex='776F726C64')
+			}],
+			hash_lock_entries=[{'row': _create_hash_lock_row(observed_height=1, status='used')}],
+			secret_lock_entries=[{
+				'key': create_secret_lock_search_key(LOCK_OWNER, LOCK_RECIPIENT, LOCK_SECRET, 'hash160'),
+				'rows': [invalid_secret_row]
+			}])
+
+		# Act / Assert:
+		with self.assertRaises(PsycopgError):
+			database.repair_rollback_from_height(2, _create_sync_state(
+				status='repairing', last_synced_height=1, last_synced_block_hash=b'hash 1'), refresh_entries)
+
+		# Assert:
+		self.assertEqual(original_blocks, fetch_full_block_state(database))
+		self.assertEqual(original_sync_state, fetch_normalized_sync_state(database))
+		self.assertEqual(original_namespace_state, fetch_namespace_state(database.connection))
+		self.assertEqual(original_mosaic_state, fetch_mosaic_state(database))
+		self.assertEqual(original_metadata_state, fetch_metadata_rows(database))
+		cursor = database.connection.cursor()
+		cursor.execute('SELECT hash, status, updated_at_height FROM symbol_hash_locks')
+		self.assertEqual([(LOCK_HASH, 'unused', 2)], [
+			(bytes(lock_hash), status, updated_at_height)
+			for lock_hash, status, updated_at_height in cursor.fetchall()
+		])
+		cursor.execute('SELECT composite_hash, status, updated_at_height FROM symbol_secret_locks')
+		self.assertEqual([(LOCK_COMPOSITE_HASH, 'unused', 2)], [
+			(bytes(composite_hash), status, updated_at_height)
+			for composite_hash, status, updated_at_height in cursor.fetchall()
+		])
