@@ -36,6 +36,7 @@ from .puller_test_utils import (
 	SymbolPullerTestBase,
 	create_amount_statement_item,
 	create_artifact_expiry_statement,
+	create_complete_aggregate_pair,
 	create_embedded_node_transaction,
 	create_network_properties,
 	create_node_block,
@@ -225,24 +226,15 @@ class SymbolPullerSyncTest(SymbolPullerTestBase):  # pylint: disable=too-many-pu
 		aggregate_hash = 'A' * 64
 		self._assert_alias_supply_change_refreshes_mosaic_state(
 			alias_mosaic_id,
-			[
-				create_node_transaction(
-					1,
-					transaction_hash=aggregate_hash,
-					block_index=0,
-					type=TransactionType.AGGREGATE_COMPLETE.value,
-					transactionsHash='9' * 64,
-					cosignatures=[]),
-				create_embedded_node_transaction(
-					1,
-					aggregate_hash,
-					0,
-					transaction_id='embedded-mosaic-supply-change',
-					type=TransactionType.MOSAIC_SUPPLY_CHANGE.value,
-					mosaicId=alias_mosaic_id,
-					delta=str(supply_delta),
-					action=MosaicSupplyChangeAction.INCREASE.value)
-			],
+			create_complete_aggregate_pair(
+				1,
+				aggregate_hash,
+				0,
+				transaction_id='embedded-mosaic-supply-change',
+				type=TransactionType.MOSAIC_SUPPLY_CHANGE.value,
+				mosaicId=alias_mosaic_id,
+				delta=str(supply_delta),
+				action=MosaicSupplyChangeAction.INCREASE.value),
 			[
 				# The (1, 0) entry proves the embedded transaction uses (1, 1), not its parent aggregate source.
 				{'source': {'primaryId': 1, 'secondaryId': 0}, 'resolved': mosaic_id_at_aggregate_source},
@@ -683,7 +675,7 @@ class SymbolPullerSyncTest(SymbolPullerTestBase):  # pylint: disable=too-many-pu
 		# Assert:
 		self.assertEqual(
 			[f'namespaces/{namespace_id}' for namespace_id in namespace_ids],
-			connector.namespace_paths)
+			connector.detail_paths)
 		self._assert_namespace_requests(
 			connector,
 			namespace_ids,
@@ -691,9 +683,9 @@ class SymbolPullerSyncTest(SymbolPullerTestBase):  # pylint: disable=too-many-pu
 				{'namespaceIds': namespace_ids[:MAX_PAGE_SIZE]},
 				{'namespaceIds': namespace_ids[MAX_PAGE_SIZE:]}
 			])
-		self.assertGreater(connector.max_in_flight_namespace_requests, 1)
-		self.assertLessEqual(connector.max_in_flight_namespace_requests, MAX_PAGE_SIZE)
-		self.assertEqual(0, connector.in_flight_namespace_requests)
+		self.assertGreater(connector.max_in_flight_detail_requests, 1)
+		self.assertLessEqual(connector.max_in_flight_detail_requests, MAX_PAGE_SIZE)
+		self.assertEqual(0, connector.in_flight_detail_requests)
 
 	def _assert_sync_request_counts(self, connector, block_page_count, batch_count):
 		# Assert:
