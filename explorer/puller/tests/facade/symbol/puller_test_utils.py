@@ -210,6 +210,29 @@ def create_embedded_node_transaction(height, aggregate_hash, embedded_index, tra
 	}
 
 
+def create_complete_aggregate_pair(
+	height,
+	aggregate_hash,
+	embedded_index,
+	transaction_id=None,
+	**embedded_transaction_overrides
+):
+	return [
+		create_node_transaction(
+			height,
+			transaction_hash=aggregate_hash,
+			type=TransactionType.AGGREGATE_COMPLETE.value,
+			transactionsHash='9' * 64,
+			cosignatures=[]),
+		create_embedded_node_transaction(
+			height,
+			aggregate_hash,
+			embedded_index,
+			transaction_id=transaction_id,
+			**embedded_transaction_overrides)
+	]
+
+
 def transaction_path(start_height, end_height, page_number=1):
 	return (
 		f'transactions/confirmed?fromHeight={start_height}&toHeight={end_height}'
@@ -367,7 +390,8 @@ class FakeConnector:  # pylint: disable=too-many-instance-attributes
 		namespace_by_id=None,
 		namespace_names=None,
 		mosaics_by_id=None,
-		mosaics_response=None
+		mosaics_response=None,
+		metadata_by_query=None
 	):  # pylint: disable=too-many-arguments,too-many-positional-arguments
 		self.chain_height = chain_height
 		self.pages = pages
@@ -384,6 +408,7 @@ class FakeConnector:  # pylint: disable=too-many-instance-attributes
 		self.namespace_names = namespace_names or {}
 		self.mosaics_by_id = mosaics_by_id or {}
 		self.mosaics_response = mosaics_response
+		self.metadata_by_query = metadata_by_query or {}
 		self.paths = []
 		self.post_payloads_list = []
 		self.post_requests = []
@@ -460,6 +485,11 @@ class FakeConnector:  # pylint: disable=too-many-instance-attributes
 					'pageNumber': page_number
 				}
 			}
+		if url_path.startswith('metadata?'):
+			response = self.metadata_by_query.get(url_path, {'data': []})
+			if isinstance(response, Exception):
+				raise response
+			return response
 
 		raise KeyError(url_path)
 
@@ -495,6 +525,54 @@ class FakeConnector:  # pylint: disable=too-many-instance-attributes
 			return items
 
 		raise KeyError(url_path)
+
+
+class BoundedDetailConnector(FakeConnector):
+	"""Gates detail requests so tests can observe bounded concurrent access."""
+
+	DETAIL_PATH_PREFIX = None
+
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.detail_paths = []
+		self.in_flight_detail_requests = 0
+		self.max_in_flight_detail_requests = 0
+		self._detail_requests_released = asyncio.Event()
+		self._release_scheduled = False
+
+	async def get(self, url_path, *args):
+		if not url_path.startswith(self.DETAIL_PATH_PREFIX):
+			return await super().get(url_path, *args)
+
+		self.paths.append(url_path)
+		self.detail_paths.append(url_path)
+		self.in_flight_detail_requests += 1
+		self.max_in_flight_detail_requests = max(
+			self.max_in_flight_detail_requests,
+			self.in_flight_detail_requests)
+		try:
+			if not self._release_scheduled:
+				self._release_scheduled = True
+				asyncio.get_running_loop().call_soon(self._detail_requests_released.set)
+			await self._detail_requests_released.wait()
+
+			response = self._get_detail_response(url_path)
+			if isinstance(response, Exception):
+				raise response
+
+			return response
+		finally:
+			self.in_flight_detail_requests -= 1
+
+	def _get_detail_response(self, url_path):
+		raise NotImplementedError(url_path)
+
+
+class BoundedMetadataConnector(BoundedDetailConnector):
+	DETAIL_PATH_PREFIX = 'metadata?'
+
+	def _get_detail_response(self, url_path):
+		return self.metadata_by_query.get(url_path, {'data': []})
 
 
 class ResponseConnector:
@@ -534,38 +612,11 @@ class NamespaceNamesResponseConnector(FakeConnector):
 		return await super().post(url_path, request_payload, *args)
 
 
-class BoundedNamespaceDetailConnector(FakeConnector):
-	def __init__(self, *args, **kwargs):
-		super().__init__(*args, **kwargs)
-		self.namespace_paths = []
-		self.in_flight_namespace_requests = 0
-		self.max_in_flight_namespace_requests = 0
-		self._namespace_requests_released = asyncio.Event()
-		self._release_scheduled = False
+class BoundedNamespaceDetailConnector(BoundedDetailConnector):
+	DETAIL_PATH_PREFIX = 'namespaces/'
 
-	async def get(self, url_path, *args):
-		if not url_path.startswith('namespaces/'):
-			return await super().get(url_path, *args)
-
-		self.paths.append(url_path)
-		self.namespace_paths.append(url_path)
-		self.in_flight_namespace_requests += 1
-		self.max_in_flight_namespace_requests = max(
-			self.max_in_flight_namespace_requests,
-			self.in_flight_namespace_requests)
-		try:
-			if not self._release_scheduled:
-				self._release_scheduled = True
-				asyncio.get_running_loop().call_soon(self._namespace_requests_released.set)
-			await self._namespace_requests_released.wait()
-
-			response = self.namespace_by_id[url_path.removeprefix('namespaces/')]
-			if isinstance(response, Exception):
-				raise response
-
-			return response
-		finally:
-			self.in_flight_namespace_requests -= 1
+	def _get_detail_response(self, url_path):
+		return self.namespace_by_id[url_path.removeprefix('namespaces/')]
 
 
 class SymbolPullerTestBase(TestCase):
@@ -591,6 +642,36 @@ class SymbolPullerTestBase(TestCase):
 		cursor.execute('SELECT height FROM symbol_blocks ORDER BY height')
 
 		return [row[0] for row in cursor.fetchall()]
+
+	def _fetch_table_state(self, table_names):
+		cursor = self.puller.symbol_db.connection.cursor()
+		state = {}
+		for table_name in table_names:
+			cursor.execute(
+				f'SELECT to_jsonb(table_row) FROM {table_name} AS table_row '
+				'ORDER BY to_jsonb(table_row)::text')
+			state[table_name] = cursor.fetchall()
+
+		return state
+
+	def _fetch_complete_batch_state(self):
+		return self._fetch_table_state((
+			'symbol_blocks',
+			'symbol_transactions',
+			'symbol_transaction_mosaics',
+			'symbol_transaction_addresses',
+			'symbol_receipts',
+			'symbol_accounts',
+			'symbol_account_mosaics',
+			'symbol_multisig',
+			'symbol_namespaces',
+			'symbol_alias_names',
+			'symbol_mosaics',
+			'symbol_metadata',
+			'symbol_hash_locks',
+			'symbol_secret_locks',
+			'symbol_mosaic_restrictions',
+			'symbol_sync_state'))
 
 	@staticmethod
 	def _fetch_block_hash(database, height):

@@ -1,6 +1,7 @@
 from symbolchain.sc import TransactionType
 
 from puller.model.symbol.format import address_from_public_key, camel_case_enum_name, label_for_type, timestamp_from_network_value
+from puller.model.symbol.Metadata import canonical_metadata_hex
 
 TRANSACTION_TYPE_LABELS = {
 	transaction_type.value: camel_case_enum_name(transaction_type.name)
@@ -63,12 +64,16 @@ def create_transaction_mosaic_rows(transaction_type, transaction):
 		TransactionType.MOSAIC_SUPPLY_REVOCATION.value: ('revocation', 'mosaicId', 'amount'),
 		TransactionType.MOSAIC_ADDRESS_RESTRICTION.value: ('restriction', 'mosaicId', None),
 		TransactionType.MOSAIC_DEFINITION.value: ('definition', 'id', None),
-		TransactionType.MOSAIC_SUPPLY_CHANGE.value: ('definition', 'mosaicId', 'delta')
+		TransactionType.MOSAIC_SUPPLY_CHANGE.value: ('definition', 'mosaicId', 'delta'),
+		TransactionType.MOSAIC_METADATA.value: ('metadata_target', 'targetMosaicId', None)
 	}
 	if transaction_type in single_mosaic_mappings:
 		role, mosaic_id_field, amount_field = single_mosaic_mappings[transaction_type]
+		mosaic_id = transaction[mosaic_id_field]
+		if 'metadata_target' == role:
+			mosaic_id = canonical_metadata_hex(mosaic_id, 'target id')
 		return [{
-			'mosaic_id': transaction[mosaic_id_field],
+			'mosaic_id': mosaic_id,
 			'amount': int(transaction[amount_field]) if amount_field else 0,
 			'role': role,
 			'position': 0
