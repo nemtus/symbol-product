@@ -38,8 +38,8 @@ export const Actions = () => {
 			onPress: Router.goToMultisigAccountList
 		},
 		{
-			title: $t('s_actions_externalAccount_title'),
-			description: $t('s_actions_externalAccount_description'),
+			title: $t('s_actions_bridgeAccounts_title'),
+			description: $t('s_actions_bridgeAccounts_description'),
 			imageSource: require('@/app/assets/images/art/external-accounts.png'),
 			onPress: Router.goToBridgeAccountList
 		},
@@ -48,6 +48,12 @@ export const Actions = () => {
 			description: $t('s_actions_send_description'),
 			imageSource: require('@/app/assets/images/art/ship.png'),
 			onPress: Router.goToSend
+		},
+		{
+			title: $t('s_actions_createMosaic_title'),
+			description: $t('s_actions_createMosaic_description'),
+			imageSource: require('@/app/assets/images/art/mosaic-puzzle.png'),
+			onPress: Router.goToCreatedMosaicList
 		},
 		{
 			title: $t('s_actions_bridge_title'),

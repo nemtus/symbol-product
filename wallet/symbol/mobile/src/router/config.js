@@ -13,7 +13,6 @@ export const RouteName = {
 	AccountDetails: 'AccountDetails',
 	AccountList: 'AccountList',
 	AddSeedAccount: 'AddSeedAccount',
-	AddExternalAccount: 'AddExternalAccount',
 	Send: 'Send',
 	Settings: 'Settings',
 	SettingsAbout: 'SettingsAbout',
@@ -32,6 +31,10 @@ export const RouteName = {
 	CreateContact: 'CreateContact',
 	EditContact: 'EditContact',
 	Harvesting: 'Harvesting',
+	CreateMosaic: 'CreateMosaic',
+	ModifyMosaic: 'ModifyMosaic',
+	RevokeMosaic: 'RevokeMosaic',
+	CreatedMosaicList: 'CreatedMosaicList',
 	Scan: 'Scan',
 	TransportRequest: 'TransportRequest'
 };
