@@ -322,7 +322,12 @@ class NemDatabase(DatabaseConnectionPool):
 				cosignatory_of,
 				cosignatories,
 				ar.remark
-			FROM accounts a
+			FROM (
+				SELECT * FROM accounts a
+				{where_condition}
+				{order_condition}
+				{limit_condition}
+			) a
 			LEFT JOIN account_remark ar
 				ON ar.address = a.address
 			LEFT JOIN LATERAL (
@@ -336,9 +341,7 @@ class NemDatabase(DatabaseConnectionPool):
 				LEFT JOIN mosaics m
 					ON m.namespace_name = mosaic.item->>'namespace_name'
 			) am ON true
-			{where_condition}
 			{order_condition}
-			{limit_condition}
 		'''
 
 	@staticmethod
@@ -369,14 +372,19 @@ class NemDatabase(DatabaseConnectionPool):
 
 		return f'''
 			SELECT
-				root_namespace,
-				owner,
-				registered_height,
+				n.root_namespace,
+				n.owner,
+				n.registered_height,
 				b.timestamp AS registered_timestamp,
-				expiration_height ,
-				sub_namespaces,
+				n.expiration_height,
+				n.sub_namespaces,
 				COALESCE(m.mosaics, '[]'::json) AS mosaics
-			FROM namespaces n
+			FROM (
+				SELECT * FROM namespaces n
+				{where_condition}
+				{order_condition}
+				{limit_condition}
+			) n
 			LEFT JOIN blocks b
 				on n.registered_height = b.height
 			LEFT JOIN LATERAL (
@@ -392,9 +400,7 @@ class NemDatabase(DatabaseConnectionPool):
 					ON ms.registered_height = mb.height
 				WHERE ms.root_namespace = n.root_namespace
 			) m ON true
-			{where_condition}
 			{order_condition}
-			{limit_condition}
 		'''
 
 	@staticmethod
@@ -424,7 +430,12 @@ class NemDatabase(DatabaseConnectionPool):
 				ns.registered_height AS root_namespace_registered_height,
 				ns_block.timestamp AS root_namespace_registered_timestamp,
 				ns.expiration_height AS root_namespace_expiration_height
-			FROM mosaics m
+			FROM (
+				SELECT * FROM mosaics m
+				{where_condition}
+				{order_condition}
+				{limit_condition}
+			) m
 			LEFT JOIN mosaics levy
 				ON levy.namespace_name = m.levy_namespace_name
 			LEFT JOIN namespaces ns
@@ -433,9 +444,7 @@ class NemDatabase(DatabaseConnectionPool):
 				ON ns_block.height = ns.registered_height
 			LEFT JOIN blocks m_block
 				ON m_block.height = m.registered_height
-			{where_condition}
 			{order_condition}
-			{limit_condition}
 		'''
 
 	@staticmethod
@@ -457,7 +466,12 @@ class NemDatabase(DatabaseConnectionPool):
 				COALESCE(m.mosaics, '[]'::json) AS mosaics,
 				t.size,
 				t.version
-			FROM transactions t
+			FROM (
+				SELECT * FROM transactions t
+				{where_condition}
+				{order_condition}
+				{limit_condition}
+			) t
 			LEFT JOIN LATERAL (
 				SELECT json_agg(json_build_object(
 				'namespace_name', tm.namespace_name,
@@ -468,9 +482,7 @@ class NemDatabase(DatabaseConnectionPool):
 				ON mo.namespace_name = tm.namespace_name
 			WHERE tm.transaction_id = t.id
 			) m ON true
-			{where_condition}
 			{order_condition}
-			{limit_condition}
 		'''
 
 	def _read_harvesting_active_cutoff_height(self, cursor):
@@ -605,7 +617,7 @@ class NemDatabase(DatabaseConnectionPool):
 	def get_namespaces(self, pagination, sort):
 		"""Gets namespaces pagination in database."""
 
-		order_condition = f' ORDER BY registered_height {sort}'
+		order_condition = f' ORDER BY registered_height {sort}, root_namespace ASC'
 		limit_condition = ' LIMIT %s OFFSET %s'
 
 		sql = self._generate_namespace_query(
@@ -639,7 +651,7 @@ class NemDatabase(DatabaseConnectionPool):
 	def get_mosaics(self, pagination, sort):
 		"""Gets mosaics pagination in database."""
 
-		order_condition = f' ORDER BY m.registered_height {sort}'
+		order_condition = f' ORDER BY m.registered_height {sort}, m.namespace_name'
 		limit_condition = ' LIMIT %s OFFSET %s'
 
 		sql = self._generate_mosaic_query(order_condition=order_condition, limit_condition=limit_condition)
@@ -859,75 +871,108 @@ class NemDatabase(DatabaseConnectionPool):
 		)
 
 	@staticmethod
-	def _create_multisig_inner_filter(address_condition):
-		"""Creates a filter for multisig inner transactions."""
+	def _create_transaction_filters(transaction_query, transaction_type_column):
+		"""Creates the optional listing filters, reading the transaction type from the given column."""
 
+		condition = ''
+		params = []
+
+		if transaction_query.height:
+			condition += ' AND t.height = %s'
+			params.append(transaction_query.height)
+
+		if transaction_query.transaction_types:
+			condition += f' AND {transaction_type_column} IN %s'
+			params.append(tuple(transaction_query.transaction_types))
+
+		if transaction_query.mosaic:
+			condition += (
+				' AND t.transaction_type = %s'
+				' AND EXISTS (SELECT 1 FROM transactions_mosaic tm'
+				' WHERE tm.transaction_id = t.id AND tm.namespace_name = %s)'
+			)
+			params.extend([TransactionType.TRANSFER.value, transaction_query.mosaic])
+
+		return condition, params
+
+	@staticmethod
+	def _create_address_branches(transaction_query):
+		"""Creates one branch per address role being searched; a sender and recipient pair narrows a single branch."""
+
+		if transaction_query.address:
+			address = transaction_query.address.bytes
+
+			return [('sender_address', '', [address]), ('recipient_address', '', [address])]
+
+		if transaction_query.sender_address and transaction_query.recipient_address:
+			return [(
+				'sender_address',
+				' AND t.recipient_address = %s',
+				[transaction_query.sender_address.bytes, transaction_query.recipient_address.bytes]
+			)]
+
+		if transaction_query.sender_address:
+			return [('sender_address', '', [transaction_query.sender_address.bytes])]
+
+		if transaction_query.recipient_address:
+			return [('recipient_address', '', [transaction_query.recipient_address.bytes])]
+
+		return []
+
+	@staticmethod
+	def _create_address_page_condition(branches, sort, filters, pagination):
+		"""Restricts the listing to one page of ids, chosen by index ordered branches before any row is hydrated."""
+
+		filter_condition, filter_params = filters
+		page_size = pagination.limit + pagination.offset
+		branch_sql = []
+		params = []
+
+		for column, extra_condition, address_params in branches:
+			branch_sql.append(
+				' (SELECT COALESCE(o.id, t.id) AS id, t.height'
+				' FROM transactions t'
+				' LEFT JOIN transactions o ON o.transaction_hash = t.aggregate_hash'
+				f' WHERE t.{column} = %s{extra_condition}'
+				f' AND t.transaction_type <> {TransactionType.MULTISIG.value}'
+				f'{filter_condition}'
+				f' ORDER BY t.height {sort}, t.id {sort}'
+				' LIMIT %s)'
+			)
+			params.extend(address_params + filter_params + [page_size])
+
+		# a branch resolves an inner row to its owner, so only an unlinked one could reach here; listing it would
+		# expose a row that carries no signature, so the listing states outright that it holds top level transactions
 		return (
-			' OR ('
-			f' t.transaction_type = {TransactionType.MULTISIG.value}'
-			' AND EXISTS ('
-			' SELECT 1 FROM transactions it'
-			' WHERE it.is_inner = true'
-			" AND it.transaction_hash = decode(t.payload->>'inner_hash', 'hex')"
-			f' AND {address_condition}'
-			' )'
-			' )'
+			' WHERE t.is_inner = false AND t.id IN (SELECT id FROM ('
+			f' SELECT DISTINCT id, height FROM ({" UNION ALL ".join(branch_sql)}) page'
+			f' ORDER BY height {sort}, id {sort}'
+			' LIMIT %s OFFSET %s) page_ids)',
+			params + [pagination.limit, pagination.offset]
 		)
 
 	def get_transactions(self, pagination, sort, transaction_query):
 		"""Gets transactions pagination."""
 
-		where_condition = ' WHERE t.is_inner = False '
 		order_condition = f' ORDER BY t.height {sort}'
-		limit_condition = ' LIMIT %s OFFSET %s'
+		branches = self._create_address_branches(transaction_query)
 
-		filter_params = []
-
-		if transaction_query.height:
-			where_condition += ' AND t.height = %s'
-			filter_params.append(transaction_query.height)
-
-		if transaction_query.transaction_types:
-			where_condition += ' AND t.transaction_type IN %s'
-			filter_params.append(tuple(transaction_query.transaction_types))
-
-		# Exclude multisig wrappers when matching by initiator.
-		non_multisig_sender_filter = f'(t.transaction_type != {TransactionType.MULTISIG.value} AND t.sender_address = %s)'
-
-		if transaction_query.address:
-			multisig_inner_filter = self._create_multisig_inner_filter('(it.sender_address = %s OR it.recipient_address = %s)')
-			where_condition += (
-				f' AND ({non_multisig_sender_filter}'
-				' OR t.recipient_address = %s'
-				f'{multisig_inner_filter})'
+		if branches:
+			# the page is chosen by the branches, so the outer query has nothing left to limit
+			limit_condition = ''
+			# ties are broken the same way the branches order them, otherwise the page and its rows disagree
+			order_condition += f', t.id {sort}'
+			where_condition, params = self._create_address_page_condition(
+				branches,
+				sort,
+				self._create_transaction_filters(transaction_query, 'COALESCE(o.transaction_type, t.transaction_type)'),
+				pagination
 			)
-			filter_params.extend([transaction_query.address.bytes] * 4)
 		else:
-			if transaction_query.sender_address:
-				multisig_inner_filter = self._create_multisig_inner_filter('it.sender_address = %s')
-				where_condition += (
-					f' AND ({non_multisig_sender_filter}'
-					f'{multisig_inner_filter})'
-				)
-				filter_params.extend([transaction_query.sender_address.bytes] * 2)
-
-			if transaction_query.recipient_address:
-				multisig_inner_filter = self._create_multisig_inner_filter('it.recipient_address = %s')
-				where_condition += (
-					' AND (t.recipient_address = %s'
-					f'{multisig_inner_filter})'
-				)
-				filter_params.extend([transaction_query.recipient_address.bytes] * 2)
-
-		if transaction_query.mosaic:
-			where_condition += (
-				' AND t.transaction_type = %s'
-				' AND EXISTS (SELECT 1 FROM transactions_mosaic tm WHERE tm.transaction_id = t.id AND tm.namespace_name = %s) '
-			)
-
-			filter_params.extend([TransactionType.TRANSFER.value, transaction_query.mosaic])
-
-		params = filter_params + [pagination.limit, pagination.offset]
+			limit_condition = ' LIMIT %s OFFSET %s'
+			filter_condition, filter_params = self._create_transaction_filters(transaction_query, 't.transaction_type')
+			where_condition = ' WHERE t.is_inner = False ' + filter_condition
+			params = filter_params + [pagination.limit, pagination.offset]
 
 		transactions = self._get_transactions(
 			params,

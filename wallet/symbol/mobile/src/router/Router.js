@@ -63,9 +63,6 @@ export class Router {
 	static goToAddSeedAccount(params) {
 		navigationRef.navigate(RouteName.AddSeedAccount, parseNavigationParams(params));
 	}
-	static goToAddExternalAccount(params) {
-		navigationRef.navigate(RouteName.AddExternalAccount, parseNavigationParams(params));
-	}
 	static goToSend(params) {
 		navigationRef.navigate(RouteName.Send, parseNavigationParams(params));
 	}
@@ -119,6 +116,18 @@ export class Router {
 	}
 	static goToHarvesting(params) {
 		navigationRef.navigate(RouteName.Harvesting, parseNavigationParams(params));
+	}
+	static goToCreateMosaic(params) {
+		navigationRef.navigate(RouteName.CreateMosaic, parseNavigationParams(params));
+	}
+	static goToModifyMosaic(params) {
+		navigationRef.navigate(RouteName.ModifyMosaic, parseNavigationParams(params));
+	}
+	static goToRevokeMosaic(params) {
+		navigationRef.navigate(RouteName.RevokeMosaic, parseNavigationParams(params));
+	}
+	static goToCreatedMosaicList(params) {
+		navigationRef.navigate(RouteName.CreatedMosaicList, parseNavigationParams(params));
 	}
 	static goToScan(params) {
 		navigationRef.navigate(RouteName.Scan, parseNavigationParams(params));

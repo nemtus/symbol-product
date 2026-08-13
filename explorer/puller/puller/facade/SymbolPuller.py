@@ -1,3 +1,5 @@
+# pylint: disable=too-many-lines
+
 import asyncio
 import configparser
 import uuid
@@ -13,11 +15,37 @@ from symbollightapi.connector.SymbolConnector import SymbolConnector
 from symbollightapi.model.Exceptions import NodeException
 from zenlog import log
 
-from puller.db.SymbolDatabase import SymbolDatabase
+from puller.db.SymbolDatabase import RollbackRefreshEntries, SymbolDatabase
+from puller.facade.async_utils import gather_in_chunks
 from puller.facade.RequestRateLimiter import RequestRateLimiter
 from puller.model.symbol.Account import HARVESTING_ACTIVE_WINDOW_DAYS, create_account_row, create_multisig_row
 from puller.model.symbol.Block import create_block_row
+from puller.model.symbol.format import is_exact_integer
+from puller.model.symbol.Lock import (
+	RollbackLockKeys,
+	create_hash_lock_key,
+	create_hash_lock_row,
+	create_secret_lock_row,
+	create_secret_lock_search_key_from_hex_secret,
+	lock_hash_algorithm_label
+)
+from puller.model.symbol.Metadata import (
+	METADATA_TRANSACTION_TYPE_LABELS,
+	METADATA_TYPE_NUMBERS,
+	canonical_metadata_hex,
+	canonical_metadata_key,
+	create_metadata_row,
+	metadata_target_from_relations
+)
 from puller.model.symbol.Mosaic import create_mosaic_row
+from puller.model.symbol.MosaicRestriction import (
+	MOSAIC_RESTRICTION_ENTRY_TYPE_BY_TRANSACTION_TYPE,
+	MosaicRestrictionEntryType,
+	MosaicRestrictionKey,
+	create_mosaic_restriction_key,
+	create_mosaic_restriction_row,
+	mosaic_restriction_entry_type_to_enum_value
+)
 from puller.model.symbol.Namespace import create_alias_name_rows, create_namespace_row
 from puller.model.symbol.Receipt import (
 	INFLATION_RECEIPT_TYPE,
@@ -33,10 +61,14 @@ DatabaseConfiguration = namedtuple('DatabaseConfiguration', ['database', 'user',
 NativeMosaicInfo = namedtuple('NativeMosaicInfo', ['id', 'divisibility'])
 TransactionSource = namedtuple('TransactionSource', ['primary_id', 'secondary_id'])
 ResolutionStatements = namedtuple('ResolutionStatements', ['address', 'mosaic'])
+ResolutionRequest = namedtuple('ResolutionRequest', ['height', 'kind'])
 MAX_PAGE_SIZE = 100
 ACCOUNT_BATCH_FETCH_SIZE = MAX_PAGE_SIZE
 BLOCK_PAGE_FETCH_CONCURRENCY = 10
 RESOLUTION_FETCH_CONCURRENCY = 10
+METADATA_FETCH_CONCURRENCY = 10
+LOCK_FETCH_CONCURRENCY = 10
+MOSAIC_RESTRICTION_FETCH_CONCURRENCY = 10
 DEFAULT_MAX_REQUESTS_PER_SECOND = 20
 ACCOUNT_PAGE_SIZE = 100
 
@@ -189,6 +221,8 @@ class SymbolPuller:
 			if not finalized_hash:
 				raise ValueError(f'Unable to determine finalized hash for height {finalized_height}')
 
+		await self._sync_finalization_lock_cleanup(finalized_height)
+
 		self.symbol_db.upsert_sync_state({
 			'status': 'healthy',
 			'chain_height': chain_height,
@@ -278,20 +312,43 @@ class SymbolPuller:
 
 	async def _repair_from_height(self, height, sync_state):
 		# Unlike account/multisig rows (deleted by the repair and repopulated by the next dirty-key touch or
-		# refresh snapshot run), namespaces and mosaics have no broad re-dirty signal: only registration,
-		# alias, supply, or expiry events touch their ids, and none may recur after a fork. Re-fetch node state
-		# before the repair write and apply it in the same transaction, deleting an artifact only when the node
-		# confirms it is gone.
+		# refresh snapshot run), namespaces, mosaics, and metadata have no broad re-dirty signal: only
+		# registration, alias, supply, expiry, or metadata events touch their keys, and none may recur after a
+		# fork. Re-fetch node state before the repair write and apply it in the same transaction, deleting an
+		# artifact only when the node confirms it is gone.
 		namespace_ids = self.symbol_db.get_namespace_ids_updated_from_height(height)
 		namespace_entries = await self._fetch_dirty_namespaces(namespace_ids, height - 1)
 		mosaic_ids = self.symbol_db.get_mosaic_ids_updated_from_height(height)
 		mosaic_entries = await self._fetch_dirty_mosaics(mosaic_ids, height - 1)
+		metadata_keys = self._union_metadata_keys(
+			self.symbol_db.get_metadata_keys_updated_from_height(height),
+			self.symbol_db.get_confirmed_metadata_keys_since(height))
+		metadata_entries = await self._fetch_dirty_metadata(metadata_keys, height - 1)
+		# Current rows recover Lock state still present after the fork. Finalized rows cannot be part of this
+		# unfinalized repair range, so transaction history is not an authoritative rollback key source.
+		hash_lock_keys = self.symbol_db.get_hash_lock_hashes_updated_from_height(height)
+		secret_lock_keys = self.symbol_db.get_secret_lock_search_keys_updated_from_height(height)
+		hash_lock_entries = await self._fetch_dirty_hash_locks(hash_lock_keys, height - 1)
+		secret_lock_entries = await self._fetch_dirty_secret_locks(secret_lock_keys, height - 1)
+		# Restrictions need both current rows and persisted transaction child rows: an orphaned branch can
+		# have deleted a current row before the rollback, leaving the transaction-derived logical key as
+		# the only way to fetch and restore that state before the destructive rollback transaction.
+		mosaic_restriction_keys = set(self.symbol_db.get_mosaic_restriction_keys_updated_from_height(height))
+		mosaic_restriction_keys.update(self.symbol_db.get_confirmed_mosaic_restriction_keys_since(height))
+		mosaic_restriction_entries = await self._fetch_dirty_mosaic_restrictions(
+			list(mosaic_restriction_keys), height - 1)
 		self.symbol_db.repair_rollback_from_height(height, {
 			**sync_state,
 			'status': 'repairing',
 			'last_synced_height': height - 1,
 			'last_synced_block_hash': self.symbol_db.get_block_hash(height - 1)
-		}, namespace_entries, mosaic_entries)
+		}, RollbackRefreshEntries(
+			namespace_entries,
+			mosaic_entries,
+			metadata_entries,
+			hash_lock_entries,
+			secret_lock_entries,
+			mosaic_restriction_entries))
 		return height
 
 	async def _sync_block_pages(  # pylint: disable=too-many-locals
@@ -341,7 +398,7 @@ class SymbolPuller:
 
 		return last_synced_height, last_synced_block_hash
 
-	async def _sync_block_batch_with_dirty_state(
+	async def _sync_block_batch_with_dirty_state(  # pylint: disable=too-many-locals
 		self,
 		batch_rows,
 		epoch_adjustment_seconds,
@@ -363,17 +420,40 @@ class SymbolPuller:
 			dirty_addresses,
 			observed_height,
 			native_mosaic_info)
-		direct_dirty_namespace_ids = self._collect_dirty_namespace_ids_for_batch(
-			transaction_rows_by_height,
-			receipt_rows_by_height)
-		dirty_namespace_ids = self._expand_dirty_namespace_ids(direct_dirty_namespace_ids)
+		dirty_namespace_ids = self._expand_dirty_namespace_ids(
+			self._collect_dirty_namespace_ids_for_batch(transaction_rows_by_height, receipt_rows_by_height))
 		dirty_namespace_entries = await self._fetch_dirty_namespaces(dirty_namespace_ids, observed_height)
 		dirty_mosaic_ids = self._collect_dirty_mosaic_ids_for_batch(transaction_rows_by_height, receipt_rows_by_height)
 		dirty_mosaic_entries = await self._fetch_dirty_mosaics(dirty_mosaic_ids, observed_height)
+		dirty_metadata_keys = self._collect_dirty_metadata_keys_for_batch(transaction_rows_by_height)
+		dirty_metadata_entries = await self._fetch_dirty_metadata(dirty_metadata_keys, observed_height)
+		dirty_lock_keys = self._collect_dirty_lock_keys_for_batch(transaction_rows_by_height)
+		dirty_hash_lock_entries = await self._fetch_dirty_hash_locks(
+			list(dirty_lock_keys.hash_keys), observed_height)
+		dirty_secret_lock_entries = await self._fetch_dirty_secret_locks(
+			list(dirty_lock_keys.secret_keys), observed_height)
+		dirty_mosaic_restriction_keys = self._collect_dirty_mosaic_restriction_keys_for_batch(
+			transaction_rows_by_height)
+		dirty_mosaic_restriction_entries = await self._fetch_dirty_mosaic_restrictions(
+			list(dirty_mosaic_restriction_keys), observed_height)
 		self._sync_block_batch(batch_rows, transaction_rows_by_height, receipt_rows_by_height)
 		self._write_dirty_accounts_for_batch(dirty_account_rows)
 		self.symbol_db.apply_namespace_entries(dirty_namespace_entries)
 		self._write_dirty_mosaics(dirty_mosaic_entries)
+		self._write_dirty_metadata(dirty_metadata_entries)
+		self._write_dirty_hash_locks(dirty_hash_lock_entries)
+		self._write_dirty_secret_locks(dirty_secret_lock_entries)
+		self._write_dirty_mosaic_restrictions(dirty_mosaic_restriction_entries)
+
+	async def _sync_finalization_lock_cleanup(self, finalized_height):
+		"""Reconciles all current Lock rows whose end height has reached finalization."""
+
+		hash_lock_keys = self.symbol_db.get_hash_lock_hashes_reaching_finalized_height(finalized_height)
+		secret_lock_keys = self.symbol_db.get_secret_lock_search_keys_reaching_finalized_height(finalized_height)
+		# Fetch every replacement before the first cleanup write so a failed request leaves all state untouched.
+		hash_lock_entries = await self._fetch_dirty_hash_locks(hash_lock_keys, finalized_height)
+		secret_lock_entries = await self._fetch_dirty_secret_locks(secret_lock_keys, finalized_height)
+		self.symbol_db.apply_finalization_lock_entries(hash_lock_entries, secret_lock_entries)
 
 	def _sync_block_batch(self, batch_rows, transaction_rows_by_height, receipt_rows_by_height):
 		"""Writes previously-fetched block, transaction, and receipt rows for one batch.
@@ -434,14 +514,14 @@ class SymbolPuller:
 
 		return dict(rows_by_height)
 
-	async def _get_resolution_statements(self, kind, height):
+	async def _get_resolution_statements(self, request):
 		resolution_entries_by_unresolved = {}
 		page_number = 1
 		while True:
 			response = await self.get_symbol_node(
-				f'/statements/resolutions/{kind}?height={height}&pageSize={MAX_PAGE_SIZE}&pageNumber={page_number}'
+				f'/statements/resolutions/{request.kind}?height={request.height}&pageSize={MAX_PAGE_SIZE}&pageNumber={page_number}'
 			)
-			items = self._get_node_page_data(response, f'Malformed Symbol {kind} resolution page response')
+			items = self._get_node_page_data(response, f'Malformed Symbol {request.kind} resolution page response')
 			for item in items:
 				statement = item['statement']
 				resolution_entries_by_unresolved[statement['unresolved'].upper()] = statement['resolutionEntries']
@@ -517,36 +597,38 @@ class SymbolPuller:
 
 		source = self._transaction_resolution_source(row, top_level_rows_by_hash)
 		if alias_addresses:
+			def _resolve_transaction_alias_address(address):
+				resolved_hex = self._resolve_transaction_alias(
+					resolution_statements.address,
+					address.hex().upper(),
+					source,
+					'address',
+					height)
+				return bytes.fromhex(resolved_hex)
+
 			for address_row in row['address_rows']:
 				if address_row['address'] in alias_addresses:
-					resolved = self._resolve_transaction_alias(
-						resolution_statements.address,
-						address_row['address'].hex().upper(),
-						source,
-						'address',
-						height)
-					address_row['address'] = bytes.fromhex(resolved)
+					address_row['address'] = _resolve_transaction_alias_address(address_row['address'])
 			row['address_rows'] = unique_address_rows(row['address_rows'])
 			for field_name in ('recipient_address', 'target_address'):
 				address = row[field_name]
 				if address in alias_addresses:
-					resolved = self._resolve_transaction_alias(
-						resolution_statements.address,
-						address.hex().upper(),
-						source,
-						'address',
-						height)
-					row[field_name] = bytes.fromhex(resolved)
+					row[field_name] = _resolve_transaction_alias_address(address)
 
 		if alias_mosaic_ids:
+			def _resolve_transaction_alias_mosaic(mosaic_id):
+				return self._resolve_transaction_alias(
+					resolution_statements.mosaic,
+					mosaic_id.upper(),
+					source,
+					'mosaic',
+					height)
+
 			for mosaic_row in row['mosaic_rows']:
 				if mosaic_row['mosaic_id'] in alias_mosaic_ids:
-					mosaic_row['mosaic_id'] = self._resolve_transaction_alias(
-						resolution_statements.mosaic,
-						mosaic_row['mosaic_id'].upper(),
-						source,
-						'mosaic',
-						height)
+					mosaic_row['mosaic_id'] = _resolve_transaction_alias_mosaic(mosaic_row['mosaic_id'])
+				if 'metadata_target' == mosaic_row['role']:
+					mosaic_row['mosaic_id'] = canonical_metadata_hex(mosaic_row['mosaic_id'], 'target id')
 
 	async def _resolve_transaction_rows_for_batch(self, transaction_rows_by_height):  # pylint: disable=too-many-locals
 		resolution_requests = []
@@ -558,19 +640,19 @@ class SymbolPuller:
 
 			resolution_statements_by_height[height] = ResolutionStatements({}, {})
 			if alias_addresses:
-				resolution_requests.append((height, 'address'))
+				resolution_requests.append(ResolutionRequest(height, 'address'))
 			if alias_mosaic_ids:
-				resolution_requests.append((height, 'mosaic'))
+				resolution_requests.append(ResolutionRequest(height, 'mosaic'))
 
 		for batch_start in range(0, len(resolution_requests), RESOLUTION_FETCH_CONCURRENCY):
 			batch_requests = resolution_requests[batch_start:batch_start + RESOLUTION_FETCH_CONCURRENCY]
 			batch_statements = await asyncio.gather(*(
-				self._get_resolution_statements(kind, height)
-				for height, kind in batch_requests
+				self._get_resolution_statements(request)
+				for request in batch_requests
 			))
-			for (height, kind), statements in zip(batch_requests, batch_statements):
-				resolution_statements_by_height[height] = resolution_statements_by_height[height]._replace(
-					**{kind: statements})
+			for request, statements in zip(batch_requests, batch_statements):
+				resolution_statements_by_height[request.height] = resolution_statements_by_height[request.height]._replace(
+					**{request.kind: statements})
 
 		for height, transaction_rows in transaction_rows_by_height.items():
 			if height not in resolution_statements_by_height:
@@ -646,6 +728,11 @@ class SymbolPuller:
 		for transaction_rows in transaction_rows_by_height.values():
 			for transaction_row in transaction_rows:
 				for address_row in transaction_row['address_rows']:
+					# Mosaic Address Restriction targets can have restriction state without account state,
+					# so keep the transaction relation but do not require an account refresh for this role.
+					if TransactionType.MOSAIC_ADDRESS_RESTRICTION.value == transaction_row['type'] and 'target' == address_row['role']:
+						continue
+
 					address = Address(address_row['address'])
 					if address not in dirty_addresses:
 						dirty_addresses[address] = {
@@ -803,6 +890,305 @@ class SymbolPuller:
 				self.symbol_db.delete_mosaic(entry['mosaic_id'])
 			else:
 				self.symbol_db.upsert_mosaic(entry['row'])
+
+	@staticmethod
+	def _collect_dirty_metadata_keys_for_batch(transaction_rows_by_height):
+		"""Collects natural keys for exact-key metadata searches and deduplication.
+
+		Empty exact-key searches must delete the local row, but supply no composite hash from the node.
+		"""
+
+		dirty_metadata_keys = {}
+		for transaction_rows in transaction_rows_by_height.values():
+			for transaction_row in transaction_rows:
+				metadata_type = METADATA_TRANSACTION_TYPE_LABELS.get(transaction_row['type'])
+				if metadata_type is None:
+					continue
+
+				metadata_target_rows = [
+					mosaic_row
+					for mosaic_row in transaction_row['mosaic_rows']
+					if 'metadata_target' == mosaic_row['role']
+				]
+				body = transaction_row['body']
+				target_id = metadata_target_from_relations(metadata_type, metadata_target_rows)
+				if 'namespace' == metadata_type:
+					target_id = body['targetNamespaceId']
+
+				key = canonical_metadata_key({
+					'metadata_type': metadata_type,
+					'source_address': transaction_row['signer_address'],
+					'target_address': transaction_row['target_address'],
+					'scoped_metadata_key': body['scopedMetadataKey'],
+					'target_id': target_id
+				})
+				key_identity = (
+					key['metadata_type'],
+					key['source_address'],
+					key['target_address'],
+					key['scoped_metadata_key'],
+					key['target_id'])
+				dirty_metadata_keys[key_identity] = key
+
+		return list(dirty_metadata_keys.values())
+
+	@staticmethod
+	def _union_metadata_keys(*metadata_key_collections):
+		metadata_keys = {}
+		for collection in metadata_key_collections:
+			for metadata_key in collection:
+				metadata_key = canonical_metadata_key(metadata_key)
+				identity = (
+					metadata_key['metadata_type'],
+					metadata_key['source_address'],
+					metadata_key['target_address'],
+					metadata_key['scoped_metadata_key'],
+					metadata_key['target_id'])
+				metadata_keys[identity] = metadata_key
+
+		return list(metadata_keys.values())
+
+	async def _fetch_dirty_metadata(self, metadata_keys, observed_height):
+		"""Fetches metadata by exact natural key in bounded concurrent batches."""
+
+		if not metadata_keys:
+			return []
+
+		async def fetch_entry(metadata_key):
+			address = Address(metadata_key['source_address'])
+			target_address = Address(metadata_key['target_address'])
+			metadata_number = METADATA_TYPE_NUMBERS[metadata_key['metadata_type']]
+			path = (
+				f'/metadata?sourceAddress={address}&targetAddress={target_address}'
+				f'&scopedMetadataKey={metadata_key["scoped_metadata_key"]}&metadataType={metadata_number}'
+			)
+			if metadata_key['target_id'] is not None:
+				path += f'&targetId={metadata_key["target_id"]}'
+
+			response = await self.get_symbol_node(path)
+			items = self._get_node_page_data(response, 'Malformed Symbol metadata search response')
+			if not isinstance(items, list):
+				raise ValueError('Malformed Symbol metadata search data')
+			if len(items) > 1:
+				raise ValueError('Symbol metadata exact-key search returned multiple entries')
+			if not items:
+				return {'key': metadata_key}
+
+			return {'row': create_metadata_row(items[0], observed_height)}
+
+		return await gather_in_chunks(metadata_keys, METADATA_FETCH_CONCURRENCY, fetch_entry)
+
+	def _write_dirty_metadata(self, entries):
+		"""Writes fetched metadata current-state changes after all batch fetches complete."""
+
+		for entry in entries:
+			if 'key' in entry:
+				self.symbol_db.delete_metadata_by_key(entry['key'])
+			else:
+				self.symbol_db.upsert_metadata(entry['row'])
+
+	@staticmethod
+	def _assert_resolved_transaction_address(address, field_name, collector_name):
+		if address is not None and Address(address).is_alias():
+			raise ValueError(
+				f'Unresolved Symbol transaction {field_name} reached {collector_name} dirty-key collection')
+
+	@staticmethod
+	def _assert_resolved_transaction_mosaic_id(mosaic_id, field_name, collector_name):
+		try:
+			is_unresolved = not isinstance(mosaic_id, str) or is_alias_mosaic_id(mosaic_id)
+		except (TypeError, ValueError):
+			is_unresolved = True
+		if is_unresolved:
+			raise ValueError(
+				f'Unresolved Symbol transaction {field_name} reached {collector_name} dirty-key collection')
+
+	def _collect_dirty_lock_keys_for_batch(self, transaction_rows_by_height):
+		"""Collects Hash and Secret Lock dirty keys from transactions in the current batch."""
+
+		hash_keys = set()
+		secret_keys = set()
+		for transaction_rows in transaction_rows_by_height.values():
+			for transaction_row in transaction_rows:
+				transaction_type = transaction_row['type']
+				body = transaction_row['body']
+				if TransactionType.HASH_LOCK.value == transaction_type:
+					self._assert_lock_mosaic_rows_resolved(transaction_row, 'hash_lock')
+					hash_keys.add(create_hash_lock_key(body['hash']))
+				elif TransactionType.AGGREGATE_BONDED.value == transaction_type:
+					hash_keys.add(create_hash_lock_key(transaction_row['hash']))
+				elif transaction_type in (TransactionType.SECRET_LOCK.value, TransactionType.SECRET_PROOF.value):
+					if TransactionType.SECRET_LOCK.value == transaction_type:
+						self._assert_lock_mosaic_rows_resolved(transaction_row, 'secret_lock')
+					self._assert_resolved_transaction_address(transaction_row['recipient_address'], 'recipient_address', 'Lock')
+					owner_address = transaction_row['signer_address'] if TransactionType.SECRET_LOCK.value == transaction_type else None
+					self._assert_resolved_transaction_address(owner_address, 'signer_address', 'Lock')
+					secret_keys.add(create_secret_lock_search_key_from_hex_secret(
+						owner_address,
+						transaction_row['recipient_address'],
+						body['secret'],
+						lock_hash_algorithm_label(body['hashAlgorithm'])))
+
+		return RollbackLockKeys(hash_keys, secret_keys)
+
+	@staticmethod
+	def _assert_lock_mosaic_rows_resolved(transaction_row, role):
+		for mosaic_row in transaction_row.get('mosaic_rows', []):
+			if mosaic_row.get('role') == role and mosaic_row.get('position') == 0:
+				SymbolPuller._assert_resolved_transaction_mosaic_id(mosaic_row.get('mosaic_id'), 'mosaic_id', 'Lock')
+
+	@staticmethod
+	def _collect_dirty_mosaic_restriction_keys_for_batch(transaction_rows_by_height):
+		"""Collects resolved Mosaic Restriction logical keys touched by transactions."""
+
+		dirty_keys = set()
+		for transaction_rows in transaction_rows_by_height.values():
+			for transaction_row in transaction_rows:
+				transaction_type = transaction_row['type']
+				entry_type = MOSAIC_RESTRICTION_ENTRY_TYPE_BY_TRANSACTION_TYPE.get(transaction_type)
+				if entry_type is None:
+					continue
+
+				position_zero_rows = [
+					mosaic_row
+					for mosaic_row in transaction_row['mosaic_rows']
+					if mosaic_row['role'] == 'restriction' and mosaic_row['position'] == 0
+				]
+				if len(position_zero_rows) != 1:
+					raise ValueError(
+						f'Invalid Symbol transaction restriction mosaic relation at height {transaction_row["height"]}')
+				mosaic_id = position_zero_rows[0]['mosaic_id']
+				SymbolPuller._assert_resolved_transaction_mosaic_id(
+					mosaic_id, 'mosaic_id', 'Mosaic Restriction')
+				mosaic_id = mosaic_id.upper()
+				if entry_type is MosaicRestrictionEntryType.ADDRESS:
+					address = transaction_row['target_address']
+					SymbolPuller._assert_resolved_transaction_address(address, 'target_address', 'Mosaic Restriction')
+				else:
+					address = None
+
+				dirty_keys.add(create_mosaic_restriction_key(entry_type, mosaic_id, address))
+
+		return dirty_keys
+
+	async def _fetch_dirty_hash_locks(self, hash_keys, observed_height):
+		"""Fetches Hash Lock detail state in bounded concurrent batches."""
+
+		async def fetch_entry(hash_key):
+			path = f'/lock/hash/{hash_key.hash.hex().upper()}'
+			response = await self.get_symbol_node(path, not_found_as_error=False)
+			if _is_not_found_response(response):
+				return {'hash': hash_key}
+
+			row = create_hash_lock_row(response, observed_height)
+			if row['hash'] != hash_key.hash:
+				raise ValueError('Symbol Hash Lock response hash does not match dirty key')
+
+			return {'row': row}
+
+		return await gather_in_chunks(hash_keys, LOCK_FETCH_CONCURRENCY, fetch_entry)
+
+	async def _fetch_dirty_secret_locks(self, search_keys, observed_height):
+		"""Fetches and exactly filters paginated Secret Lock search results in bounded concurrent batches."""
+
+		async def fetch_entry(search_key):
+			page_number = 1
+			matching_rows = []
+			composite_hashes = set()
+			while True:
+				path = '/lock/secret?'
+				if search_key.owner_address is not None:
+					path += f'address={Address(search_key.owner_address)}&'
+				path += f'secret={search_key.secret.hex().upper()}&pageSize={MAX_PAGE_SIZE}&pageNumber={page_number}'
+				response = await self.get_symbol_node(path, not_found_as_error=False)
+				if _is_not_found_response(response):
+					items = []
+				else:
+					if not isinstance(response, dict) or not isinstance(response.get('data'), list):
+						raise ValueError('Malformed Symbol Secret Lock search response')
+					items = response['data']
+
+				for item in items:
+					row = create_secret_lock_row(item, observed_height)
+					if row['composite_hash'] in composite_hashes:
+						raise ValueError('Duplicate Symbol Secret Lock composite hash')
+					composite_hashes.add(row['composite_hash'])
+					if search_key.owner_address is not None and row['owner_address'] != search_key.owner_address:
+						continue
+					if row['recipient_address'] != search_key.recipient_address:
+						continue
+					if row['secret'] != search_key.secret:
+						continue
+					if row['hash_algorithm'] != search_key.hash_algorithm:
+						continue
+					matching_rows.append(row)
+
+				if len(items) < MAX_PAGE_SIZE:
+					return {'key': search_key, 'rows': matching_rows}
+
+				page_number += 1
+
+		return await gather_in_chunks(search_keys, LOCK_FETCH_CONCURRENCY, fetch_entry)
+
+	async def _fetch_dirty_mosaic_restrictions(self, restriction_keys, observed_height):
+		"""Fetches exact Mosaic Restriction state in bounded concurrent batches."""
+
+		async def fetch_entry(restriction_key):
+			entry_type = mosaic_restriction_entry_type_to_enum_value(restriction_key.entry_type)
+			path = (
+				f'/restrictions/mosaic?mosaicId={restriction_key.mosaic_id}'
+				f'&entryType={entry_type}&pageSize={MAX_PAGE_SIZE}&pageNumber=1'
+			)
+			if restriction_key.entry_type is MosaicRestrictionEntryType.ADDRESS:
+				path += f'&targetAddress={Address(restriction_key.target_address)}'
+
+			response = await self.get_symbol_node(path)
+			if not isinstance(response, dict) or not isinstance(response.get('pagination'), dict):
+				raise ValueError('Malformed Symbol Mosaic Restriction search response')
+			pagination = response['pagination']
+			# A page-one request does not guarantee matching node pagination metadata. Treating an
+			# incorrectly paged empty result as a deletion would destructively remove current state.
+			page_number = pagination.get('pageNumber')
+			page_size = pagination.get('pageSize')
+			if not is_exact_integer(page_number) or page_number != 1 or not is_exact_integer(page_size) or page_size != MAX_PAGE_SIZE:
+				raise ValueError('Invalid Symbol Mosaic Restriction search pagination')
+			items = response.get('data')
+			if not isinstance(items, list):
+				raise ValueError('Malformed Symbol Mosaic Restriction search data')
+			if len(items) > 1:
+				raise ValueError('Symbol Mosaic Restriction exact-key search returned multiple entries')
+			if not items:
+				return {'key': restriction_key, 'rows': []}
+
+			row = create_mosaic_restriction_row(items[0], observed_height)
+			row_key = MosaicRestrictionKey(row['entry_type'], row['mosaic_id'], row['target_address'])
+			if row_key != restriction_key:
+				raise ValueError('Symbol Mosaic Restriction response does not match dirty key')
+			return {'key': restriction_key, 'rows': [row]}
+
+		return await gather_in_chunks(
+			restriction_keys, MOSAIC_RESTRICTION_FETCH_CONCURRENCY, fetch_entry)
+
+	def _write_dirty_hash_locks(self, entries):
+		"""Writes fetched Hash Lock current-state changes after all batch fetches complete."""
+
+		for entry in entries:
+			if 'hash' in entry:
+				self.symbol_db.delete_hash_lock(entry['hash'])
+			else:
+				self.symbol_db.upsert_hash_lock(entry['row'])
+
+	def _write_dirty_secret_locks(self, entries):
+		"""Replaces fetched Secret Lock logical keys after all batch fetches complete."""
+
+		for entry in entries:
+			self.symbol_db.replace_secret_locks(entry['key'], entry['rows'])
+
+	def _write_dirty_mosaic_restrictions(self, entries):
+		"""Replaces fetched Mosaic Restriction logical keys after all batch fetches complete."""
+
+		for entry in entries:
+			self.symbol_db.replace_mosaic_restrictions(entry['key'], entry['rows'])
 
 	async def _fetch_dirty_accounts_for_batch(  # pylint: disable=too-many-locals
 		self,
