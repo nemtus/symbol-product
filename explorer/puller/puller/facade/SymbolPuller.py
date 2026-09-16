@@ -13,13 +13,13 @@ from common.symbol.NodeConfiguration import SymbolNodeConfiguration
 from symbolchain.facade.SymbolFacade import SymbolFacade
 from symbolchain.sc import TransactionType
 from symbolchain.symbol.Network import Address, Network
-from symbollightapi.connector.SymbolConnector import SymbolConnector
 from symbollightapi.model.Exceptions import NodeException
 from zenlog import log
 
 from puller.db.SymbolDatabase import RollbackRefreshEntries, SymbolDatabase
-from puller.facade.async_utils import gather_in_chunks
+from puller.facade.async_utils import CONTROL_FLOW_EXCEPTIONS, gather_in_chunks, log_cleanup_failure_safely, select_exception_by_priority
 from puller.facade.RequestRateLimiter import RequestRateLimiter
+from puller.facade.SymbolPullerConnector import SymbolPullerConnector
 from puller.facade.SymbolSyncPerformance import SyncPerformance, request_category
 from puller.model.symbol.Account import HARVESTING_ACTIVE_WINDOW_DAYS, create_account_row, create_multisig_row
 from puller.model.symbol.Block import create_block_row
@@ -63,11 +63,13 @@ from puller.model.symbol.Transaction import create_transaction_row, unique_addre
 DatabaseConfiguration = namedtuple('DatabaseConfiguration', ['database', 'user', 'password', 'host', 'port'])
 NativeMosaicInfo = namedtuple('NativeMosaicInfo', ['id', 'divisibility'])
 TransactionSource = namedtuple('TransactionSource', ['primary_id', 'secondary_id'])
+TransactionCountExpectation = namedtuple('TransactionCountExpectation', ['top_level_count', 'total_count'])
 ResolutionStatements = namedtuple('ResolutionStatements', ['address', 'mosaic'])
 ResolutionRequest = namedtuple('ResolutionRequest', ['height', 'kind'])
 MAX_PAGE_SIZE = 100
 ACCOUNT_BATCH_FETCH_SIZE = MAX_PAGE_SIZE
 BLOCK_PAGE_FETCH_CONCURRENCY = 10
+TRANSACTION_PAGE_FETCH_CONCURRENCY = 10
 RESOLUTION_FETCH_CONCURRENCY = 10
 METADATA_FETCH_CONCURRENCY = 10
 LOCK_FETCH_CONCURRENCY = 10
@@ -75,6 +77,16 @@ MOSAIC_RESTRICTION_FETCH_CONCURRENCY = 10
 DEFAULT_MAX_REQUESTS_PER_SECOND = 20
 ACCOUNT_PAGE_SIZE = 100
 NEMESIS_PREVIOUS_BLOCK_HASH = bytes(32)
+# Namespace detail and account multisig fetches use one request per item in a max-size batch.
+# Pin the pool to that application concurrency policy, even though aiohttp currently has the same default limit.
+SYMBOL_HTTP_CONNECTION_POOL_LIMIT = max(
+	BLOCK_PAGE_FETCH_CONCURRENCY,
+	RESOLUTION_FETCH_CONCURRENCY,
+	METADATA_FETCH_CONCURRENCY,
+	LOCK_FETCH_CONCURRENCY,
+	MOSAIC_RESTRICTION_FETCH_CONCURRENCY,
+	MAX_PAGE_SIZE,
+	ACCOUNT_BATCH_FETCH_SIZE)
 
 
 def _get_symbol_network(network_type):
@@ -111,11 +123,12 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 		config_file,
 		network_type='mainnet',
 		node_config=None,
-		connector=None,
 		max_requests_per_second=DEFAULT_MAX_REQUESTS_PER_SECOND,
 		rate_limiter=None,
 		time_source=time.monotonic,
-		performance_logger=log
+		performance_logger=log,
+		connector_factory=SymbolPullerConnector,
+		cleanup_logger=log
 	):
 		"""Creates a Symbol puller facade object."""
 
@@ -124,10 +137,9 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 
 		db_config = config['symbol_db']
 
-		network = _get_symbol_network(network_type)
-
 		self._time_source = time_source
 		self._performance_logger = performance_logger
+		self._cleanup_logger = cleanup_logger
 		self._active_performance = None
 		self.symbol_db = SymbolDatabase(
 			DatabaseConfiguration(**db_config),
@@ -135,9 +147,11 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 			time_source=time_source)
 		self.node_config = node_config or SymbolNodeConfiguration.from_url(node_url)
 		symbol_node_endpoint = self.node_config.assert_request_allowed(self.node_config.base_url)
-		self._symbol_connector = connector or SymbolConnector(symbol_node_endpoint)
-		self._symbol_connector.timeout_seconds = self.node_config.timeout_seconds
-		self.symbol_facade = SymbolFacade(network)
+		self._symbol_connector = connector_factory(
+			symbol_node_endpoint,
+			self.node_config.timeout_seconds,
+			SYMBOL_HTTP_CONNECTION_POOL_LIMIT)
+		self.symbol_facade = SymbolFacade(_get_symbol_network(network_type))
 		self._retry_delay = 2
 		self._rate_limiter = rate_limiter or RequestRateLimiter(max_requests_per_second, time_source=time_source)
 		self._native_mosaic_info = None
@@ -164,12 +178,80 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 			# Event construction or logging failure must never replace the synchronization result.
 			pass
 
-	def __enter__(self):
-		self.symbol_db.__enter__()
-		return self
+	async def __aenter__(self):
+		"""Enters the puller lifecycle and opens its factory-created node session."""
 
-	def __exit__(self, *args):
-		self.symbol_db.__exit__(*args)
+		try:
+			await self._symbol_connector.open()
+			self.symbol_db.__enter__()
+			return self
+		except BaseException as primary_error:  # pylint: disable=broad-exception-caught
+			try:
+				await self._symbol_connector.close()
+			except BaseException as cleanup_error:  # pylint: disable=broad-exception-caught
+				selected_error = select_exception_by_priority(primary_error, cleanup_error)
+				if selected_error is primary_error:
+					if isinstance(cleanup_error, CONTROL_FLOW_EXCEPTIONS):
+						raise primary_error from cleanup_error
+					log_cleanup_failure_safely(
+						self._cleanup_logger,
+						f'Failed to close Symbol node session after lifecycle failure: {cleanup_error}')
+				else:
+					raise cleanup_error
+			raise
+
+	async def __aexit__(self, exc_type, exc_value, traceback):
+		"""Exits the puller lifecycle without masking an operation or cleanup failure."""
+
+		primary_error = exc_value
+		cleanup_error = None
+		control_flow_error = None
+		try:
+			self.symbol_db.__exit__(exc_type, exc_value, traceback)
+		except CONTROL_FLOW_EXCEPTIONS as error:
+			control_flow_error = select_exception_by_priority(control_flow_error, error)
+		except BaseException as error:  # pylint: disable=broad-exception-caught
+			cleanup_error = error
+
+		try:
+			await self._symbol_connector.close()
+		except CONTROL_FLOW_EXCEPTIONS as error:
+			control_flow_error = select_exception_by_priority(control_flow_error, error)
+		except BaseException as error:  # pylint: disable=broad-exception-caught
+			if cleanup_error is None:
+				cleanup_error = error
+			else:
+				log_cleanup_failure_safely(
+					self._cleanup_logger,
+					f'Failed to close Symbol node session after database cleanup failure: {error}')
+
+		return self._resolve_lifecycle_exit(primary_error, control_flow_error, cleanup_error)
+
+	def _resolve_lifecycle_exit(self, primary_error, control_flow_error, cleanup_error):
+		if control_flow_error is not None:
+			if select_exception_by_priority(primary_error, control_flow_error) is primary_error:
+				if cleanup_error is not None:
+					log_cleanup_failure_safely(
+						self._cleanup_logger,
+						f'Failed to clean up Symbol puller after operation failure: {cleanup_error}')
+				return False
+			if cleanup_error is not None:
+				log_cleanup_failure_safely(
+					self._cleanup_logger,
+					f'Failed to clean up Symbol puller during interruption: {cleanup_error}')
+			raise control_flow_error
+
+		if primary_error is not None:
+			if cleanup_error is not None:
+				log_cleanup_failure_safely(
+					self._cleanup_logger,
+					f'Failed to clean up Symbol puller after operation failure: {cleanup_error}')
+			return False
+
+		if cleanup_error is not None:
+			raise cleanup_error
+
+		return False
 
 	def _validate_symbol_node_path(self, url_path):
 		parsed_url = urlparse(url_path)
@@ -323,7 +405,8 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 			start_height,
 			chain_height,
 			epoch_adjustment_seconds,
-			native_mosaic_info)
+			native_mosaic_info,
+			finalized_height)
 		if last_synced_height is None and bounded_sync_state:
 			last_synced_height = bounded_sync_state['last_synced_height']
 			last_synced_block_hash = bounded_sync_state['last_synced_block_hash']
@@ -499,7 +582,8 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 		start_height,
 		chain_height,
 		epoch_adjustment_seconds,
-		native_mosaic_info
+		native_mosaic_info,
+		observed_finalized_height=None
 	):
 		last_synced_height = None
 		last_synced_block_hash = None
@@ -549,7 +633,7 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 
 				if is_final_batch:
 					await self._sync_block_batch_with_dirty_state(
-						batch_rows, epoch_adjustment_seconds, native_mosaic_info, batch)
+						batch_rows, epoch_adjustment_seconds, native_mosaic_info, batch, observed_finalized_height)
 					self._active_performance.complete_batch(batch)
 					self._log_performance_event(
 						batch, 'symbol_sync_batch_completed', 'completed')
@@ -557,7 +641,7 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 
 				batch.set_range(batch_rows[0]['height'], batch_rows[-1]['height'])
 				await self._sync_block_batch_with_dirty_state(
-					batch_rows, epoch_adjustment_seconds, native_mosaic_info, batch)
+					batch_rows, epoch_adjustment_seconds, native_mosaic_info, batch, observed_finalized_height)
 				self._active_performance.complete_batch(batch)
 				self._log_performance_event(
 					batch, 'symbol_sync_batch_completed', 'completed')
@@ -574,13 +658,20 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 		batch_rows,
 		epoch_adjustment_seconds,
 		native_mosaic_info,
-		batch
+		batch,
+		observed_finalized_height=None
 	):
+		expected_transaction_counts = {
+			row['height']: TransactionCountExpectation(row['transactions_count'], row['total_transactions_count'])
+			for row in batch_rows
+		}
 		with batch.measure('transaction_fetch_ms', 'transaction_fetch'):
 			transaction_rows_by_height = await self._get_transaction_rows_by_height(
 				batch_rows[0]['height'],
 				batch_rows[-1]['height'],
-				epoch_adjustment_seconds
+				epoch_adjustment_seconds,
+				expected_transaction_counts,
+				observed_finalized_height
 			)
 			batch.set_count('transaction_count', sum(len(rows) for rows in transaction_rows_by_height.values()))
 		with batch.measure('receipt_fetch_ms', 'receipt_fetch'):
@@ -668,24 +759,169 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 		for row in block_rows:
 			self.symbol_db.upsert_transactions_for_height(row['height'], rows_by_height.get(row['height'], []))
 
-	async def _get_transaction_rows_by_height(self, start_height, end_height, epoch_adjustment_seconds):
+	async def _get_transaction_rows_by_height(  # pylint: disable=too-many-locals
+		self,
+		start_height,
+		end_height,
+		epoch_adjustment_seconds,
+		expected_transaction_counts,
+		observed_finalized_height=None
+	):
+		# Source: _symbol/openapi/spec/schemas/Pagination.yml and TransactionPage.yml at 0f4c95e7098bbd84a8ceb9e2a101496bdfe662cf.
+		# Symbol pagination exposes pageNumber/pageSize only; finalized ranges derive page count from block metadata.
+		expected_total = sum(expectation.total_count for expectation in expected_transaction_counts.values())
+		is_finalized_range = is_exact_integer(observed_finalized_height) and observed_finalized_height >= end_height
+		page_results = {1: await self._get_transaction_page(start_height, end_height, 1)}
+		if is_finalized_range:
+			page_count = max(1, (expected_total + MAX_PAGE_SIZE - 1) // MAX_PAGE_SIZE)
+			self._validate_transaction_page_count(page_results[1], 1, self._expected_transaction_page_size(expected_total, 1))
+			if page_count > 1:
+				await self._get_transaction_pages_bounded(
+					start_height,
+					end_height,
+					expected_total,
+					end_page_number=page_count,
+					page_results=page_results)
+		else:
+			page_number = 1
+			while len(page_results[page_number]) == MAX_PAGE_SIZE:
+				page_number += 1
+				page_results[page_number] = await self._get_transaction_page(start_height, end_height, page_number)
+			page_count = len(page_results)
+
+		items = [
+			item
+			for page_number in range(1, page_count + 1)
+			for item in page_results[page_number]
+		]
+		if len(items) != expected_total:
+			raise ValueError(f'Expected {expected_total} Symbol transactions, received {len(items)}')
+
 		rows_by_height = {}
-		page_number = 1
-		while True:
-			response = await self.get_symbol_node(
-				f'/transactions/confirmed?fromHeight={start_height}&toHeight={end_height}'
-				f'&pageSize={MAX_PAGE_SIZE}&pageNumber={page_number}&order=asc&embedded=true'
-			)
-			items = self._get_node_page_data(response, 'Malformed Symbol transaction page response')
-			for item in items:
-				row = create_transaction_row(item, self.symbol_facade.network, epoch_adjustment_seconds)
-				rows_by_height.setdefault(row['height'], []).append(row)
-				self._record_performance('add_count', 'transaction_count', 1)
+		seen_transaction_keys = set()
+		for item in items:
+			if not isinstance(item, dict):
+				raise ValueError('Malformed Symbol transaction item')
 
-			if len(items) < MAX_PAGE_SIZE:
-				return rows_by_height
+			row = create_transaction_row(item, self.symbol_facade.network, epoch_adjustment_seconds)
+			transaction_key = self._transaction_identity(row)
+			if transaction_key in seen_transaction_keys:
+				raise ValueError(f'Duplicate Symbol transaction at height {row["height"]}')
 
-			page_number += 1
+			seen_transaction_keys.add(transaction_key)
+			if not start_height <= row['height'] <= end_height:
+				raise ValueError(f'Symbol transaction height {row["height"]} is outside requested range')
+
+			rows_by_height.setdefault(row['height'], []).append(row)
+			self._record_performance('add_count', 'transaction_count', 1)
+
+		for height, expected_counts in expected_transaction_counts.items():
+			rows_at_height = rows_by_height.get(height, [])
+			actual_top_level_count = sum(not row['is_embedded'] for row in rows_at_height)
+			if actual_top_level_count != expected_counts.top_level_count:
+				raise ValueError(
+					f'Expected {expected_counts.top_level_count} top-level Symbol transactions at height {height}, '
+					f'received {actual_top_level_count}')
+			if len(rows_at_height) != expected_counts.total_count:
+				raise ValueError(
+					f'Expected {expected_counts.total_count} total Symbol transactions at height {height}, '
+					f'received {len(rows_at_height)}')
+
+		return rows_by_height
+
+	@staticmethod
+	def _expected_transaction_page_size(expected_total, page_number):
+		page_start = (page_number - 1) * MAX_PAGE_SIZE
+		return max(0, min(MAX_PAGE_SIZE, expected_total - page_start))
+
+	async def _get_transaction_page(self, start_height, end_height, page_number):
+		response = await self.get_symbol_node(
+			f'/transactions/confirmed?fromHeight={start_height}&toHeight={end_height}'
+			f'&pageSize={MAX_PAGE_SIZE}&pageNumber={page_number}&order=asc&embedded=true'
+		)
+		if not isinstance(response, dict) or 'data' not in response or 'pagination' not in response:
+			raise ValueError('Malformed Symbol transaction page response')
+
+		items = response['data']
+		pagination = response['pagination']
+		if not isinstance(items, list) or not isinstance(pagination, dict):
+			raise ValueError('Malformed Symbol transaction page response')
+		if 'pageNumber' not in pagination or 'pageSize' not in pagination:
+			raise ValueError('Malformed Symbol transaction pagination')
+		if not is_exact_integer(pagination['pageNumber']) or not is_exact_integer(pagination['pageSize']):
+			raise ValueError('Invalid Symbol transaction pagination')
+		if pagination['pageNumber'] != page_number:
+			raise ValueError(
+				f'Symbol transaction page number {pagination["pageNumber"]} does not match requested page {page_number}')
+		if pagination['pageSize'] != MAX_PAGE_SIZE:
+			raise ValueError('Symbol transaction page size does not match requested page size')
+		if len(items) > MAX_PAGE_SIZE:
+			raise ValueError('Symbol transaction page data exceeds requested page size')
+
+		return items
+
+	@staticmethod
+	def _validate_transaction_page_count(items, page_number, expected_count):
+		if len(items) != expected_count:
+			raise ValueError(
+				f'Expected {expected_count} transactions on Symbol transaction page {page_number}, received {len(items)}')
+
+	async def _get_transaction_pages_bounded(
+		self,
+		start_height,
+		end_height,
+		expected_total,
+		end_page_number,
+		page_results
+	):
+		next_page_number = 2
+		allocation_lock = asyncio.Lock()
+
+		async def fetch_pages():
+			nonlocal next_page_number
+			while True:
+				async with allocation_lock:
+					if next_page_number > end_page_number:
+						return
+					page_number = next_page_number
+					next_page_number += 1
+
+				items = await self._get_transaction_page(start_height, end_height, page_number)
+				self._validate_transaction_page_count(
+					items,
+					page_number,
+					self._expected_transaction_page_size(expected_total, page_number))
+				page_results[page_number] = items
+
+		worker_count = min(TRANSACTION_PAGE_FETCH_CONCURRENCY, end_page_number - 1)
+		workers = [asyncio.create_task(fetch_pages()) for _ in range(worker_count)]
+		try:
+			await asyncio.gather(*workers)
+		except BaseException:  # pylint: disable=broad-exception-caught
+			await self._cancel_transaction_page_workers(workers)
+			raise
+
+	@staticmethod
+	async def _cancel_transaction_page_workers(workers):
+		for worker in workers:
+			if not worker.done():
+				worker.cancel()
+
+		cleanup = asyncio.gather(*workers, return_exceptions=True)
+		# Preserve the original page-fetch exception by draining workers despite one cancellation during cleanup.
+		# Retry the shielded wait once; another cancellation during that retry propagates instead,
+		# so worker collection is not guaranteed under repeated cancellation.
+		try:
+			await asyncio.shield(cleanup)
+		except asyncio.CancelledError:
+			await asyncio.shield(cleanup)
+
+	@staticmethod
+	def _transaction_identity(row):
+		if row['is_embedded']:
+			return 'embedded', row['aggregate_hash'], row['embedded_index']
+
+		return 'top_level', row['hash']
 
 	async def _get_block_page(self, offset):
 		response = await self.get_symbol_node(f'/blocks?pageSize={MAX_PAGE_SIZE}&offset={offset}&orderBy=height')
