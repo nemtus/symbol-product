@@ -1,5 +1,5 @@
 import {
-	AccountView,
+	AccountRow,
 	ButtonPlain,
 	Card,
 	CopyButtonContainer,
@@ -8,7 +8,7 @@ import {
 	Spacer,
 	Stack,
 	StyledText,
-	TokenView
+	TokenBalanceRow
 } from '@/app/components';
 import { PlatformUtils } from '@/app/lib/platform/PlatformUtils';
 import { $t } from '@/app/localization';
@@ -17,21 +17,20 @@ import { Colors } from '@/app/styles';
 import { createExplorerTransactionUrl } from '@/app/utils';
 
 /** @typedef {import('@/app/screens/bridge/types/Bridge').SwapSideTypeValue} SwapSideTypeValue */
-/** @typedef {import('@/app/screens/bridge/types/Bridge').ResolvedTokenData} ResolvedTokenData */
-/** @typedef {import('@/app/screens/bridge/types/Bridge').ResolvedAccountData} ResolvedAccountData */
+/** @typedef {import('@/app/types/Account').AccountDisplayData} AccountDisplayData */
 /** @typedef {import('@/app/types/Network').NetworkIdentifier} NetworkIdentifier */
 /** @typedef {import('@/app/types/Network').ChainName} ChainName */
+/** @typedef {import('@/app/types/Token').TokenDisplayData} TokenDisplayData */
 
 /**
- * SwapSideDetails component. Displays detailed information for one side of a swap,
- * including token info, chain name, account address, and transaction hash with
- * copy functionality and block explorer link.
+ * SwapSideDetails component. Shows details for a single swap side, such as the token details,
+ * account address, transaction hash and block explorer link.
  * @param {object} props - Component props.
  * @param {SwapSideTypeValue} props.type - The side type (source or target).
  * @param {ChainName} props.chainName - The blockchain name.
  * @param {NetworkIdentifier} props.networkIdentifier - The network identifier.
- * @param {ResolvedTokenData} props.token - Token information.
- * @param {ResolvedAccountData|null} props.account - Account information.
+ * @param {TokenDisplayData} props.token - Token information. A null amount shows the amount placeholder.
+ * @param {AccountDisplayData|null} props.account - Account information.
  * @param {string|null} props.transactionHash - The transaction hash.
  * @returns {import('react').ReactNode} SwapSideDetails component.
  */
@@ -43,9 +42,6 @@ export const SwapSideDetails = ({ type, chainName, networkIdentifier, token, acc
 	const accountTitle = type === SwapSideType.SOURCE
 		? $t('fieldTitle_senderAddress')
 		: $t('fieldTitle_recipientAddress');
-
-	// Token
-	const tokenAmountText = token.amount ? token.amount : '..';
 
 	// Transaction hash
 	const isTransactionVisible = !!transactionHash;
@@ -62,11 +58,10 @@ export const SwapSideDetails = ({ type, chainName, networkIdentifier, token, acc
 		<Card>
 			<Spacer>
 				<Stack>
-					<TokenView
-						name={token.name}
-						ticker={token.ticker}
+					<TokenBalanceRow
+						name={token.nameText}
 						imageId={token.imageId}
-						amount={tokenAmountText}
+						amount={token.amount}
 						size="l"
 					/>
 					<Divider color={Colors.Semantic.background.tertiary.lighter} />
@@ -78,7 +73,7 @@ export const SwapSideDetails = ({ type, chainName, networkIdentifier, token, acc
 					<Field title={accountTitle}>
 						{isAccountVisible ? (
 							<CopyButtonContainer value={account.address} isStretched>
-								<AccountView
+								<AccountRow
 									address={account.address}
 									name={account.name}
 									imageId={account.imageId}
