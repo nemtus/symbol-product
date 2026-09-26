@@ -16,7 +16,7 @@ import { usePasscode, useToggle, useWalletController } from '@/app/hooks';
 import { PlatformUtils } from '@/app/lib/platform/PlatformUtils';
 import { $t } from '@/app/localization';
 import { Router } from '@/app/router/Router';
-import { createAccountAddressQr, createExplorerAccountUrl } from '@/app/utils';
+import { createAccountAddressQr, createExplorerAccountUrl, createTokenDisplayData } from '@/app/utils';
 import React, { useState } from 'react';
 
 /**
@@ -29,6 +29,7 @@ export const BridgeAccountDetails = ({ route }) => {
 	const walletController = useWalletController(chainName);
 	const { networkIdentifier, currentAccount, currentAccountInfo } = walletController;
 	const tokens = currentAccountInfo?.tokens || currentAccountInfo?.mosaics || [];
+	const tokensDisplayData = tokens.map(token => createTokenDisplayData(token, chainName, networkIdentifier));
 
 	// Send/Receive buttons
 	const receiveQrData = createAccountAddressQr({
@@ -97,17 +98,21 @@ export const BridgeAccountDetails = ({ route }) => {
 						/>
 						<Stack gap="s">
 							<StyledText type="title">
-								{$t('s_bridge_tokens_title')}
+								{$t('screen_bridge_title_tokens')}
 							</StyledText>
-							{tokens.map(token => (
-								<TokenListItem
-									key={token.id}
-									token={token}
-									chainName={chainName}
-									networkIdentifier={networkIdentifier}
-									onPress={handleTokenPress}
-								/>
-							))}
+							{tokens.map((token, index) => {
+								const tokenDisplayData = tokensDisplayData[index];
+
+								return (
+									<TokenListItem
+										key={token.id}
+										name={tokenDisplayData.nameText}
+										amount={tokenDisplayData.amount}
+										imageId={tokenDisplayData.imageId}
+										onPress={() => handleTokenPress(token)}
+									/>
+								);
+							})}
 						</Stack>
 					</Stack>
 				</Spacer>
@@ -137,7 +142,7 @@ export const BridgeAccountDetails = ({ route }) => {
 			<Screen.Modals>
 				<DialogBox
 					type="alert"
-					title={$t('dialog_sensitive')}
+					title={$t('dialog_sensitiveInformation_title')}
 					text={privateKey}
 					isVisible={isPrivateKeyDialogShown}
 					onSuccess={togglePrivateKeyDialog}
@@ -145,7 +150,7 @@ export const BridgeAccountDetails = ({ route }) => {
 				<DialogBox
 					type="confirm"
 					title={$t('dialog_removeAccount_title')}
-					text={$t('dialog_removeAccount_body', { name: chainName, address: currentAccount.address })}
+					text={$t('dialog_removeAccount_description', { name: chainName, address: currentAccount.address })}
 					isVisible={isRemoveConfirmVisible}
 					onSuccess={handleConfirmRemove}
 					onCancel={toggleRemoveConfirm}
