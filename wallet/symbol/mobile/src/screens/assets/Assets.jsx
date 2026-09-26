@@ -1,8 +1,9 @@
 import { useAssetsData } from './hooks';
 import { Header } from '@/app/app/components';
-import { AccountView, CopyButtonContainer, FilteredListScreenTemplate, Spacer, StyledText, TokenListItem } from '@/app/components';
+import { AccountRow, CopyButtonContainer, FilteredListScreenTemplate, Spacer, StyledText, TokenListItem } from '@/app/components';
 import { useInit, useRefresh, useWalletController, useWalletRefreshLifecycle } from '@/app/hooks';
 import { Router } from '@/app/router/Router';
+import { createTokenDisplayData, createTokenExpiration } from '@/app/utils';
 import React, { useCallback } from 'react';
 
 /**
@@ -14,7 +15,6 @@ import React, { useCallback } from 'react';
 export const Assets = () => {
 	const walletController = useWalletController();
 	const {
-		networkIdentifier,
 		networkProperties,
 		currentAccount,
 		isWalletReady
@@ -62,7 +62,7 @@ export const Assets = () => {
 				</Spacer>
 			)}
 			<CopyButtonContainer value={section.address} isStretched>
-				<AccountView
+				<AccountRow
 					address={section.address}
 					name={section.name}
 				/>
@@ -71,28 +71,29 @@ export const Assets = () => {
 	), []);
 
 	const renderItem = useCallback(({ item, section }) => {
-		const handleTokenPress = token => {
+		const tokenDisplayData = createTokenDisplayData(item, section.chainName, section.networkIdentifier);
+
+		const handleTokenPress = () => {
 			Router.goToTokenDetails({
 				params: {
 					chainName: section.chainName,
 					accountAddress: section.address,
-					tokenId: token.id,
-					preloadedData: token
+					tokenId: item.id,
+					preloadedData: item
 				}
 			});
 		};
 
 		return (
 			<TokenListItem
-				token={item}
-				chainName={section.chainName}
-				networkIdentifier={networkIdentifier}
-				chainHeight={networkProperties.chainHeight}
-				blockGenerationTargetTime={networkProperties.blockGenerationTargetTime}
+				name={tokenDisplayData.nameText}
+				amount={tokenDisplayData.amount}
+				imageId={tokenDisplayData.imageId}
+				expiration={createTokenExpiration(item, networkProperties)}
 				onPress={handleTokenPress}
 			/>
 		);
-	}, [networkIdentifier, networkProperties.chainHeight, networkProperties.blockGenerationTargetTime]);
+	}, [networkProperties]);
 
 	return (
 		<FilteredListScreenTemplate
