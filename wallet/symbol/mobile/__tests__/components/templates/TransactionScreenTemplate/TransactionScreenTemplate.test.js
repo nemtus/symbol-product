@@ -2,7 +2,6 @@ import { TransactionScreenTemplate } from '@/app/components/templates/Transactio
 import { AccountFixtureBuilder } from '__fixtures__/local/AccountFixtureBuilder';
 import { ScreenTester } from '__tests__/ScreenTester';
 import { mockLocalization, mockPasscode, mockWalletController } from '__tests__/mock-helpers';
-import React from 'react';
 import { Text } from 'react-native';
 
 // Constants
@@ -13,12 +12,12 @@ const SCREEN_TEXT = {
 	buttonConfirm: 'button_confirm',
 	buttonCancel: 'button_cancel',
 	// Dialog
-	textConfirmDialogTitle: 'form_transfer_confirm_title',
+	textConfirmDialogTitle: 'component_transactionConfirmationDialog_title_confirmTransfer',
 	textCustomConfirmTitle: 'Custom Confirm Title',
 	textCustomConfirmText: 'Custom confirm text message',
 	// Multisig warning
-	textMultisigWarningTitle: 'warning_multisig_title',
-	textMultisigWarningBody: 'warning_multisig_body',
+	textMultisigWarningTitle: 'alert_multisigWarning_title',
+	textMultisigWarningBody: 'alert_multisigWarning_description',
 	// Children content
 	textChildrenContent: 'Test Form Content'
 };

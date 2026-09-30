@@ -1,4 +1,4 @@
 aiohttp~=3.14.0
-aiolimiter~=1.2.1
+aiolimiter~=1.3.0
 nemtus-symbol-sdk~=3.3.2
 zenlog~=1.1

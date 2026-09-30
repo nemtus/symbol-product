@@ -4,7 +4,7 @@ import { ButtonCircle, DialogBox, Screen } from '@/app/components';
 import { useAsyncManager, useProp, useToggle, useWalletController } from '@/app/hooks';
 import { $t } from '@/app/localization';
 import { Router } from '@/app/router/Router';
-import React, { useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { WalletAccountType } from 'wallet-common-core/src/constants';
 
 const ROOT_ACCOUNT_INDEX = 0;
@@ -127,8 +127,8 @@ export const AccountList = () => {
 			/>
 			<DialogBox
 				type="confirm"
-				title={$t('s_accountList_confirm_removeImported_title')}
-				text={$t('s_accountList_confirm_removeImported_body', accountToRemove)}
+				title={$t('screen_account_dialog_removeImportedAccount_title')}
+				text={$t('screen_account_dialog_removeImportedAccount_description', accountToRemove)}
 				isVisible={isRemoveDialogVisible}
 				onSuccess={handleConfirmRemove}
 				onCancel={toggleRemoveDialog}
