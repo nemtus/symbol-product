@@ -1,4 +1,8 @@
+from collections import namedtuple
 from enum import Enum
+
+from common.symbol.NativeMosaic import normalize_mosaic_id
+from zenlog import log
 
 from rest.model.symbol.Block import SymbolBlockView
 
@@ -30,7 +34,8 @@ BLOCK_COLUMNS = '''
 	voting_eligible_accounts_count,
 	harvesting_eligible_accounts_count,
 	total_voting_balance,
-	previous_importance_block_hash
+	previous_importance_block_hash,
+	block_reward
 '''
 
 SYNC_STATE_COLUMNS = [
@@ -42,9 +47,22 @@ SYNC_STATE_COLUMNS = [
 	'finalized_point',
 	'last_synced_height',
 	'last_synced_block_hash',
+	'dirty_state_from_height',
 	'updated_at'
 ]
 READABLE_BLOCK_STATUSES = frozenset(['healthy', 'repairing'])
+ReceiptQuery = namedtuple(
+	'ReceiptQuery',
+	['limit', 'offset', 'height', 'receipt_group', 'receipt_type', 'included_receipt_types', 'target_address', 'sender_address'],
+	defaults=(10, 0, None, None, None, (), None, None))
+ReceiptRecord = namedtuple(
+	'ReceiptRecord',
+	['height', 'receipt_type', 'receipt_group', 'version', 'sender_address', 'recipient_address', 'target_address',
+		'mosaic_id', 'amount', 'artifact_id', 'mosaic_divisibility'])
+
+
+class SymbolDataUnavailable(RuntimeError):
+	"""Raised when Symbol block data is not safely readable."""
 
 
 class SortOrder(str, Enum):
@@ -61,8 +79,35 @@ def _address(value):
 	return str(Address(bytes(value)))
 
 
-def _is_block_data_readable(sync_state):
-	return bool(sync_state and sync_state.get('status') in READABLE_BLOCK_STATUSES and sync_state.get('last_synced_height'))
+def _get_readable_height(sync_state):
+	if not sync_state or sync_state.get('status') not in READABLE_BLOCK_STATUSES:
+		return None
+
+	last_synced_height = sync_state.get('last_synced_height')
+	if not isinstance(last_synced_height, int) or last_synced_height < 1:
+		return None
+
+	dirty_state_from_height = sync_state.get('dirty_state_from_height')
+	if dirty_state_from_height is not None:
+		if not isinstance(dirty_state_from_height, int) or dirty_state_from_height < 1:
+			return None
+		last_synced_height = min(last_synced_height, dirty_state_from_height - 1)
+
+	return last_synced_height if last_synced_height >= 1 else None
+
+
+def _is_non_public_state(sync_state):
+	return sync_state['status'] == 'repairing' or sync_state['dirty_state_from_height'] is not None
+
+
+def _is_generic_receipt_range_unavailable(sync_state):
+	"""Returns whether an unbounded receipt query can have an unsafe page boundary."""
+
+	dirty_state_from_height = sync_state['dirty_state_from_height']
+	if dirty_state_from_height is None:
+		return sync_state['status'] == 'repairing'
+
+	return dirty_state_from_height <= sync_state['last_synced_height']
 
 
 def _create_sync_state(columns, result):
@@ -75,6 +120,38 @@ def _create_sync_state(columns, result):
 class SymbolDatabase(DatabaseConnectionPool):
 	"""Database access for Symbol Explorer data."""
 
+	def __init__(self, db_config, native_mosaic_info=None):
+		"""Creates a Symbol database accessor with optional native mosaic information."""
+
+		super().__init__(db_config)
+		self.native_mosaic_info = native_mosaic_info
+		self._is_closed = False
+
+	def __enter__(self):
+		"""Returns this database while its connection pool is managed by a context."""
+
+		return self
+
+	def __exit__(self, exception_type, _exception, _traceback):
+		"""Closes the pool, preserving an active exception if ordinary cleanup fails."""
+
+		try:
+			self.close()
+		except Exception as close_error:  # pylint: disable=broad-exception-caught
+			if exception_type is None:
+				raise
+
+			log.error(f'Failed to close Symbol database after an operation failure: {close_error}')
+
+	def close(self):
+		"""Closes all connections owned by this Symbol database."""
+
+		if self._is_closed:
+			return
+
+		self._pool.closeall()
+		self._is_closed = True
+
 	def check_connection(self):
 		"""Checks whether the configured Symbol database is reachable and initialized."""
 
@@ -85,53 +162,153 @@ class SymbolDatabase(DatabaseConnectionPool):
 
 		with self.connection() as connection:
 			with connection.cursor() as cursor:
-				cursor.execute(f'SELECT {", ".join(SYNC_STATE_COLUMNS)} FROM symbol_sync_state WHERE id = 1')
-				result = cursor.fetchone()
-				return _create_sync_state(SYNC_STATE_COLUMNS, result)
+				return self._fetch_sync_state(cursor)
 
 	def get_block(self, height):
 		"""Gets a Symbol block by height."""
 
-		sync_state = self.try_get_sync_state()
-		if not _is_block_data_readable(sync_state):
-			return None
-
-		finalized_height = sync_state['finalized_height']
-
 		with self.connection() as connection:
 			with connection.cursor() as cursor:
+				self._start_read_transaction(cursor)
+				sync_state = self._fetch_sync_state(cursor)
+				readable_height = _get_readable_height(sync_state)
+				if readable_height is None:
+					raise SymbolDataUnavailable('Symbol block data is unavailable')
+				if height > readable_height:
+					# Clean state returns None outside the published range, so HTTP returns 404.
+					# Dirty or repairing state raises because it cannot be safely served, so HTTP returns 503.
+					if _is_non_public_state(sync_state):
+						raise SymbolDataUnavailable('Symbol block data is unavailable')
+					return None
+
+				finalized_height = sync_state['finalized_height']
 				cursor.execute(f'SELECT {BLOCK_COLUMNS} FROM symbol_blocks WHERE height = %s', (height,))
 				result = cursor.fetchone()
 
 				return self._create_block_view(result, finalized_height) if result else None
 
-	def get_block_head_height(self):
-		"""Gets the latest synced height for the block list."""
+	def get_receipts(self, query):
+		"""Gets a validated receipt page from one repeatable-read database snapshot."""
 
-		sync_state = self.try_get_sync_state()
-		if not _is_block_data_readable(sync_state):
-			return None
+		with self.connection() as connection:
+			with connection.cursor() as cursor:
+				self._start_read_transaction(cursor)
+				sync_state = self._fetch_sync_state(cursor)
+				readable_height = _get_readable_height(sync_state)
+				if readable_height is None:
+					raise SymbolDataUnavailable('Symbol receipt data is unavailable: sync state is unreadable')
 
-		return sync_state['last_synced_height']
+				if query.height is not None:
+					if query.height > readable_height:
+						if _is_non_public_state(sync_state):
+							raise SymbolDataUnavailable(
+								'Symbol receipt data is unavailable: requested height is above the readable height '
+								'in dirty or repairing state')
+						return None
+					cursor.execute(
+						'SELECT 1 FROM symbol_blocks WHERE height = %s AND height <= %s',
+						(query.height, readable_height))
+					if not cursor.fetchone():
+						return None
+
+				where_clauses = ['receipts.height <= sync_state.last_synced_height']
+				parameters = []
+				filters = [
+					(query.height, 'receipts.height = %s'),
+					(query.receipt_group, 'receipts.receipt_group = %s::symbol_receipt_group'),
+					(query.receipt_type, 'receipts.receipt_type = %s::symbol_receipt_type'),
+					(query.target_address, 'receipts.target_address = %s'),
+					(query.sender_address, 'receipts.sender_address = %s'),
+				]
+				for value, clause in filters:
+					if value is not None:
+						where_clauses.append(clause)
+						parameters.append(value)
+
+				if query.included_receipt_types:
+					where_clauses.append('receipts.receipt_type = ANY(%s::symbol_receipt_type[])')
+					parameters.append(list(query.included_receipt_types))
+
+				# Never filter dirty rows before OFFSET; unsafe generic pages are rejected below.
+				cursor.execute(
+					f'''
+					SELECT
+						receipts.height,
+						receipts.receipt_type,
+						receipts.receipt_group,
+						receipts.version,
+						receipts.sender_address,
+						receipts.recipient_address,
+						receipts.target_address,
+						receipts.mosaic_id,
+						receipts.amount,
+						receipts.artifact_id,
+						mosaics.divisibility
+					FROM symbol_receipts AS receipts
+					JOIN symbol_sync_state AS sync_state ON sync_state.id = 1
+					LEFT JOIN symbol_mosaics AS mosaics ON mosaics.mosaic_id = receipts.mosaic_id
+					WHERE {' AND '.join(where_clauses)}
+					ORDER BY receipts.height DESC, receipts.id DESC
+					LIMIT %s OFFSET %s
+					''',
+					(*parameters, query.limit, query.offset))
+				results = [ReceiptRecord(*result) for result in cursor.fetchall()]
+
+				if any(receipt.height > readable_height for receipt in results):
+					raise SymbolDataUnavailable(
+						'Symbol receipt data is unavailable: returned receipt row is above the readable height')
+				if query.height is None and _is_generic_receipt_range_unavailable(sync_state):
+					raise SymbolDataUnavailable(
+						'Symbol receipt data is unavailable: unbounded receipt query range is unsafe')
+				if _is_non_public_state(sync_state) and self._requires_current_receipt_metadata(results):
+					raise SymbolDataUnavailable(
+						'Symbol receipt data is unavailable: non-native mosaic metadata is unsafe '
+						'in dirty or repairing state')
+
+				return results
+
+	def _requires_current_receipt_metadata(self, receipts):
+		"""Returns whether a receipt page depends on current non-native metadata."""
+
+		for receipt in receipts:
+			if receipt.mosaic_id is None:
+				continue
+			if self.native_mosaic_info and normalize_mosaic_id(receipt.mosaic_id) == self.native_mosaic_info.id:
+				continue
+			return True
+
+		return False
 
 	def get_blocks(self, from_height, limit, sort):
 		"""Gets Symbol blocks using fromHeight cursor pagination."""
 
-		sync_state = self.try_get_sync_state()
-		if not _is_block_data_readable(sync_state):
-			return None
-
-		local_height = sync_state['last_synced_height']
-		finalized_height = sync_state['finalized_height']
 		if not isinstance(sort, SortOrder):
 			raise ValueError('Sort must be either ASC or DESC')
 
-		start_height, end_height = self._calculate_height_range(local_height, limit, from_height, sort)
-		if start_height is None:
-			return []
-
 		with self.connection() as connection:
 			with connection.cursor() as cursor:
+				self._start_read_transaction(cursor)
+				sync_state = self._fetch_sync_state(cursor)
+				readable_height = _get_readable_height(sync_state)
+				if readable_height is None:
+					raise SymbolDataUnavailable('Symbol block data is unavailable')
+
+				local_height = sync_state['last_synced_height']
+				finalized_height = sync_state['finalized_height']
+				is_non_public = _is_non_public_state(sync_state)
+				if is_non_public and from_height is not None and from_height > readable_height:
+					raise SymbolDataUnavailable('Symbol block data is unavailable')
+				start_height, end_height = self._calculate_height_range(
+					local_height,
+					limit,
+					from_height,
+					sort,
+					should_clamp_to_local_height=not is_non_public)
+				if start_height is None:
+					return []
+				if end_height > readable_height:
+					raise SymbolDataUnavailable('Symbol block data is unavailable')
+
 				cursor.execute(
 					f'''
 					SELECT {BLOCK_COLUMNS}
@@ -145,7 +322,16 @@ class SymbolDatabase(DatabaseConnectionPool):
 				return [self._create_block_view(result, finalized_height) for result in results]
 
 	@staticmethod
-	def _calculate_height_range(local_height, limit, from_height, sort):
+	def _start_read_transaction(cursor):
+		cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
+
+	@staticmethod
+	def _fetch_sync_state(cursor):
+		cursor.execute(f'SELECT {", ".join(SYNC_STATE_COLUMNS)} FROM symbol_sync_state WHERE id = 1')
+		return _create_sync_state(SYNC_STATE_COLUMNS, cursor.fetchone())
+
+	@staticmethod
+	def _calculate_height_range(local_height, limit, from_height, sort, should_clamp_to_local_height=True):
 		if 0 == limit:
 			return None, None
 
@@ -157,7 +343,8 @@ class SymbolDatabase(DatabaseConnectionPool):
 			if start_height > local_height:
 				return None, None
 
-			return start_height, min(local_height, start_height + limit - 1)
+			end_height = start_height + limit - 1
+			return start_height, min(local_height, end_height) if should_clamp_to_local_height else end_height
 
 		start_height = from_height or local_height
 		if start_height > local_height or start_height < 1:
@@ -194,5 +381,6 @@ class SymbolDatabase(DatabaseConnectionPool):
 			harvesting_eligible_accounts_count=result[23],
 			total_voting_balance=result[24],
 			previous_importance_block_hash=_bytes_or_none(result[25]),
+			block_reward=result[26],
 			is_finalized=bool(finalized_height and result[0] <= finalized_height)
 		)

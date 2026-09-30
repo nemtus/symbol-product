@@ -35,6 +35,9 @@ const BRIDGE_ID = 'symbol-xym-ethereum-bxym';
 
 const REQUEST_TRANSACTION_HASH = 'ABC123DEF456789REQUEST';
 const PAYOUT_TRANSACTION_HASH = '0xPAYOUT789ABC123DEF';
+const REQUEST_AMOUNT = '100';
+const PAYOUT_AMOUNT = '99';
+const AMOUNT_PLACEHOLDER = '..';
 const REQUEST_TIMESTAMP = 1684265310994;
 const PAYOUT_TIMESTAMP = 1684351710994;
 const ERROR_MESSAGE = 'Bridge processing error';
@@ -45,14 +48,14 @@ const PAYOUT_TIMESTAMP_TEXT = formatDate(PAYOUT_TIMESTAMP, key => key, true);
 
 const SCREEN_TEXT = {
 	// Status
-	textStatusCompleted: 's_bridge_history_status_completed',
-	textStatusProcessing: 's_bridge_history_status_processing',
-	textStatusFailed: 's_bridge_history_status_failed',
+	textStatusCompleted: 'screen_bridge_history_status_completed',
+	textStatusProcessing: 'screen_bridge_history_status_processing',
+	textStatusFailed: 'screen_bridge_history_status_failed',
 
 	// Titles
-	textTokenSendTitle: 's_bridge_swapDetails_tokenSend_title',
-	textTokenReceiveTitle: 's_bridge_swapDetails_tokenReceive_title',
-	textStatusTrackingTitle: 's_bridge_swapDetails_statusTracking_title',
+	textTokenSendTitle: 'screen_bridge_swapDetails_title_tokenSend',
+	textTokenReceiveTitle: 'screen_bridge_swapDetails_title_tokenReceive',
+	textStatusTrackingTitle: 'screen_bridge_swapDetails_title_statusTracking',
 
 	// Field titles
 	textFieldChainName: 'fieldTitle_chainName',
@@ -60,14 +63,11 @@ const SCREEN_TEXT = {
 	textFieldRecipientAddress: 'fieldTitle_recipientAddress',
 	textFieldTransactionHash: 'fieldTitle_transactionHash',
 
-	// N/A placeholder
-	textNotAvailable: 'data_v_na',
-
 	// Activity log steps
-	textStepRequestSend: 's_bridge_swapStatus_step_requestSend',
-	textStepAwaitingBridge: 's_bridge_swapStatus_step_awaitingBridge',
-	textStepPayoutSend: 's_bridge_swapStatus_step_payoutSend',
-	textStepPayoutConfirmation: 's_bridge_swapStatus_step_payoutConfirmation',
+	textStepRequestSend: 'screen_bridge_swapStatus_step_requestSend',
+	textStepAwaitingBridge: 'screen_bridge_swapStatus_step_awaitingBridge',
+	textStepPayoutSend: 'screen_bridge_swapStatus_step_payoutSend',
+	textStepPayoutConfirmation: 'screen_bridge_swapStatus_step_payoutConfirmation',
 
 	// Buttons
 	buttonOpenExplorer: 'button_openTransactionInExplorer'
@@ -134,13 +134,13 @@ const createBridgeRequestData = (overrides = {}) => ({
 		hash: REQUEST_TRANSACTION_HASH,
 		timestamp: REQUEST_TIMESTAMP,
 		signerAddress: symbolAccount.address,
-		token: { amount: '100' }
+		token: { amount: REQUEST_AMOUNT }
 	},
 	payoutTransaction: {
 		hash: PAYOUT_TRANSACTION_HASH,
 		timestamp: PAYOUT_TIMESTAMP,
 		recipientAddress: ethereumAccount.address,
-		token: { amount: '99' }
+		token: { amount: PAYOUT_AMOUNT }
 	},
 	errorMessage: null,
 	...overrides
@@ -244,12 +244,16 @@ describe('screens/bridge/BridgeSwapDetails', () => {
 						CHAIN_NAME_SYMBOL,
 						symbolAccount.address,
 						REQUEST_TRANSACTION_HASH,
+						REQUEST_AMOUNT,
 						// Target side
 						CHAIN_NAME_ETHEREUM,
 						ethereumAccount.address,
-						PAYOUT_TRANSACTION_HASH
+						PAYOUT_TRANSACTION_HASH,
+						PAYOUT_AMOUNT
 					],
-					notVisibleTexts: []
+					notVisibleTexts: [
+						AMOUNT_PLACEHOLDER
+					]
 				}
 			},
 			{
@@ -263,11 +267,14 @@ describe('screens/bridge/BridgeSwapDetails', () => {
 						CHAIN_NAME_SYMBOL,
 						symbolAccount.address,
 						REQUEST_TRANSACTION_HASH,
-						// Target side chain name visible
-						CHAIN_NAME_ETHEREUM
+						REQUEST_AMOUNT,
+						// Target side chain name and amount placeholder visible
+						CHAIN_NAME_ETHEREUM,
+						AMOUNT_PLACEHOLDER
 					],
 					notVisibleTexts: [
 						PAYOUT_TRANSACTION_HASH,
+						PAYOUT_AMOUNT,
 						ethereumAccount.address
 					]
 				}

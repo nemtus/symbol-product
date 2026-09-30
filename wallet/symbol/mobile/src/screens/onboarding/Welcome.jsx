@@ -3,7 +3,6 @@ import { termsAndPrivacy } from '@/app/config';
 import { useToggle } from '@/app/hooks';
 import { $t } from '@/app/localization';
 import { Router } from '@/app/router/Router';
-import React from 'react';
 
 export const Welcome = () => {
 	const [isTermsAndPrivacyShown, toggleTermsAndPrivacy] = useToggle(true);
@@ -18,7 +17,7 @@ export const Welcome = () => {
 					<Stack>
 						<SymbolLogo />
 						<StyledText type="title" size="l">
-							{$t('s_welcome_wallet_title')}
+							{$t('screen_onboarding_title_welcome')}
 						</StyledText>
 					</Stack>
 				</Spacer>
@@ -34,13 +33,13 @@ export const Welcome = () => {
 					type="accept"
 					isVisible={isTermsAndPrivacyShown}
 					onSuccess={toggleTermsAndPrivacy}
-					title={$t('s_welcome_modal_title')}
+					title={$t('screen_onboarding_dialog_termsAndPrivacy_title')}
 				>
 					<Stack gap="s">
-						<StyledText type="title" size="s">{$t('s_welcome_modal_tnc')}</StyledText>
+						<StyledText type="title" size="s">{$t('screen_onboarding_title_termsAndConditions')}</StyledText>
 						<StyledText type="body">{termsAndPrivacy.terms}</StyledText>
 						<StyledText type="title" />
-						<StyledText type="title" size="s">{$t('s_welcome_modal_privacy')}</StyledText>
+						<StyledText type="title" size="s">{$t('screen_onboarding_title_privacyPolicy')}</StyledText>
 						<StyledText type="body">{termsAndPrivacy.privacy}</StyledText>
 					</Stack>
 				</DialogBox>
