@@ -51,7 +51,6 @@ export const Send = props => {
 	const { route } = props;
 	const walletController = useWalletController(route.params?.chainName);
 	const {
-		accounts,
 		isWalletReady,
 		isNetworkConnectionReady,
 		networkProperties,
@@ -61,7 +60,6 @@ export const Send = props => {
 		price
 	} = walletController;
 	const currentAccountInfo = walletController.currentAccountInfo || {};
-	const walletAccounts = accounts[networkIdentifier];
 	const hasMessageField = CHAINS_WITH_MESSAGE_SUPPORT.includes(walletController.chainName);
 
 	// Sender selection (current or multisig)
@@ -201,49 +199,41 @@ export const Send = props => {
 			<Spacer>
 				<Stack gap="l">
 					<Stack gap="none">
-						<StyledText type="title">{$t('s_send_title')}</StyledText>
-						<StyledText type="body">{$t('s_send_description')}</StyledText>
+						<StyledText type="title">{$t('screen_send_title_intro')}</StyledText>
+						<StyledText type="body">{$t('screen_send_description_intro')}</StyledText>
 					</Stack>
 					<Stack gap="none">
-						<StyledText type="title" size="s">{$t('s_send_from_title')}</StyledText>
+						<StyledText type="title" size="s">{$t('screen_send_title_from')}</StyledText>
 						<SelectTransactionSender
 							value={senderAddress}
 							options={senderOptions}
-							ticker={ticker}
 							chainName={walletController.chainName}
-							networkIdentifier={networkIdentifier}
-							walletAccounts={walletAccounts}
-							addressBook={walletController.modules.addressBook}
 							onChange={changeSenderAddress}
 						/>
 					</Stack>
 					<Stack gap="none">
-						<StyledText type="title" size="s">{$t('s_send_to_title')}</StyledText>
+						<StyledText type="title" size="s">{$t('screen_send_title_to')}</StyledText>
 						<InputAddress
-							label={$t('input_recipient')}
+							label={$t('inputLabel_recipient')}
 							value={recipientAddress}
-							addressBook={walletController.modules.addressBook}
-							accounts={walletAccounts}
 							chainName={walletController.chainName}
-							networkIdentifier={walletController.networkIdentifier}
 							extraValidators={[validateRecipient(walletController.chainName)]}
 							onChange={changeRecipientAddress}
 							onValidityChange={changeRecipientValidity}
 						/>
 					</Stack>
 					<Stack gap="none">
-						<StyledText type="title" size="s">{$t('s_send_token_title')}</StyledText>
+						<StyledText type="title" size="s">{$t('screen_send_title_token')}</StyledText>
 						<Stack gap="s">
 							<SelectToken
-								label={$t('input_mosaic')}
+								label={$t('inputLabel_mosaic')}
 								value={selectedTokenId}
 								tokens={tokenListFiltered}
 								chainName={walletController.chainName}
-								networkIdentifier={walletController.networkIdentifier}
 								onChange={changeSelectedTokenId}
 							/>
 							<InputAmount
-								label={$t('input_amount')}
+								label={$t('inputLabel_amount')}
 								availableBalance={availableBalance}
 								price={tokenPrice}
 								networkIdentifier={networkIdentifier}
@@ -256,16 +246,16 @@ export const Send = props => {
 					
 					{hasMessageField && (
 						<Stack gap="none">
-							<StyledText type="title" size="s">{$t('s_send_message_title')}</StyledText>
+							<StyledText type="title" size="s">{$t('screen_send_title_message')}</StyledText>
 							<Stack gap="s">
 								<TextBox
-									label={$t('input_message')}
+									label={$t('inputLabel_message')}
 									value={messageText}
 									onChange={changeMessageText}
 								/>
 								{!isMultisigTransfer && (
 									<Checkbox
-										text={$t('input_encrypted')}
+										text={$t('inputLabel_encrypted')}
 										value={isMessageEncrypted}
 										onChange={toggleMessageEncrypted}
 									/>
@@ -277,7 +267,7 @@ export const Send = props => {
 					{!!transactionFees && (
 						<Animated.View entering={FadeInDown} exiting={FadeOut}>
 							<FeeSelector
-								title={$t('input_feeSpeed')}
+								title={$t('inputLabel_feeSpeed')}
 								value={transactionSpeed}
 								feeTiers={transactionFees}
 								ticker={ticker}

@@ -61,13 +61,12 @@ export const useSendTransaction = ({
 	 * @returns {TransactionConfirmationDialogSection[]}
 	 */
 	const getConfirmationPreview = transactionBundle => {
-		const { chainName, networkIdentifier, modules: { addressBook }, accounts } = walletController;
-		const walletAccounts = accounts;
+		const { chainName } = walletController;
 
 		const createHashLockTableData = transaction => {
 			const hashLockData = {
 				type: transaction.type,
-				description: $t('form_transfer_hash_lock_description', {
+				description: $t('screen_send_description_hashLock', {
 					lockedAmount: transaction.lockedAmount,
 					duration: transaction.duration
 				}),
@@ -109,9 +108,6 @@ export const useSendTransaction = ({
 				id: `section_${index}`,
 				title: '',
 				chainName,
-				networkIdentifier,
-				addressBook,
-				walletAccounts,
 				tableData
 			};
 		});

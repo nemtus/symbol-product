@@ -5,7 +5,6 @@ import { PlatformUtils } from '@/app/lib/platform/PlatformUtils';
 import { ScreenTester } from '__tests__/ScreenTester';
 import { mockLocalization } from '__tests__/mock-helpers';
 import { act, render } from '@testing-library/react-native';
-import React from 'react';
 
 jest.mock('@/app/lib/passcode', () => ({
 	passcodeManager: {
@@ -27,14 +26,14 @@ const TEST_PASSCODE = '1234';
 const INCORRECT_PASSCODE = '0000';
 
 const SCREEN_TEXT = {
-	textCreateEnterTitle: 's_passcode_createEnter_title',
-	textCreateConfirmTitle: 's_passcode_createConfirm_title',
-	textVerifyTitle: 's_passcode_verify_title',
-	textCreateEnterDescription: 's_passcode_createEnter_description',
-	textCreateConfirmDescription: 's_passcode_createConfirm_description',
-	textErrorIncorrect: 's_passcode_error_incorrect',
-	textErrorMismatch: 's_passcode_error_mismatch',
-	textErrorMaxAttempts: 's_passcode_error_maxAttempts_time_minute',
+	textCreateEnterTitle: 'component_passcode_title_createEnter',
+	textCreateConfirmTitle: 'component_passcode_title_createConfirm',
+	textVerifyTitle: 'component_passcode_title_verify',
+	textCreateEnterDescription: 'component_passcode_description_createEnter',
+	textCreateConfirmDescription: 'component_passcode_description_createConfirm',
+	textErrorIncorrect: 'component_passcode_errorMessage_incorrect',
+	textErrorMismatch: 'component_passcode_errorMessage_mismatch',
+	textErrorMaxAttempts: 'component_passcode_errorMessage_maxAttemptsMinute',
 	buttonCancel: 'button_cancel',
 	buttonDelete: 'delete'
 };
