@@ -1,16 +1,17 @@
 from unittest import TestCase
 
+from common.symbol.NativeMosaic import NativeMosaicInfo
 from common.symbol.NodeConfiguration import SymbolNodeConfiguration
-from common.tests.PostgresTestUtils import create_unreachable_db_configuration
 from psycopg2 import Error as PsycopgError
 from psycopg2 import OperationalError
 
-from rest.db.SymbolDatabase import SortOrder
+from rest.db.SymbolDatabase import ReceiptQuery, ReceiptRecord, SortOrder, SymbolDataUnavailable, TransactionQuery
 from rest.facade.SymbolRestFacade import SymbolRestFacade
 
 from ..test.SymbolHealthTestUtils import create_symbol_health
 
 NODE_URL = 'http://127.0.0.1:3000'
+NATIVE_MOSAIC_INFO = NativeMosaicInfo('72C0212E67A08BCE', 6)
 
 
 def _create_node_config():
@@ -23,20 +24,22 @@ class FailingSymbolDatabase:
 		raise OperationalError('database unavailable')
 
 
-class BlockHeadHeightErrorSymbolDatabase:
-	@staticmethod
-	def get_block_head_height():
-		raise PsycopgError()
-
-
 class BlockReadErrorSymbolDatabase:
-	@staticmethod
-	def get_block_head_height():
-		return 10
-
 	@staticmethod
 	def get_block(height):
 		raise PsycopgError()
+
+
+class BlocksReadErrorSymbolDatabase:
+	@staticmethod
+	def get_blocks(_from_height, _limit, _sort):
+		raise PsycopgError()
+
+
+class UnreadableBlocksSymbolDatabase:
+	@staticmethod
+	def get_blocks(_from_height, _limit, _sort):
+		raise SymbolDataUnavailable('Symbol block data is unavailable')
 
 
 class HealthySymbolDatabase:
@@ -115,11 +118,11 @@ class SyncStateFailingSymbolDatabase:
 
 class BlockView:
 	@staticmethod
-	def to_dict():
+	def to_dict(_native_mosaic_info):
 		return {'height': 1}
 
 	@staticmethod
-	def to_detail_dict():
+	def to_detail_dict(_native_mosaic_info):
 		return {'height': 1, 'detail': True}
 
 
@@ -127,16 +130,12 @@ DEFAULT_BLOCKS = object()
 
 
 class BlockSymbolDatabase:
-	def __init__(self, head_height=6, blocks=DEFAULT_BLOCKS):
-		self.head_height = head_height
+	def __init__(self, blocks=DEFAULT_BLOCKS):
 		self.blocks = [BlockView()] if DEFAULT_BLOCKS is blocks else blocks
 		self.limit = None
 		self.from_height = None
 		self.sort = None
 		self.height = None
-
-	def get_block_head_height(self):
-		return self.head_height
 
 	def get_blocks(self, from_height, limit, sort):
 		self.from_height = from_height
@@ -149,35 +148,64 @@ class BlockSymbolDatabase:
 		return BlockView() if 1 == height else None
 
 
+class ReceiptSymbolDatabase:
+	def __init__(self, receipts):
+		self.receipts = receipts
+		self.query = None
+
+	def get_receipts(self, query):
+		self.query = query
+		return self.receipts
+
+
+class TransactionSymbolDatabase:
+	def __init__(self, transactions):
+		self.transactions = transactions
+		self.query = None
+
+	def get_transactions(self, query):
+		self.query = query
+		return self.transactions
+
+
+class ReceiptReadErrorSymbolDatabase:
+	@staticmethod
+	def get_receipts(_query):
+		raise PsycopgError('database unavailable')
+
+
 def _create_configured_facade():
-	facade = SymbolRestFacade(
-		create_unreachable_db_configuration(),
-		_create_node_config())
-	facade.symbol_db = HealthySymbolDatabase()
-	facade.db_error = None
-	return facade
+	return SymbolRestFacade(HealthySymbolDatabase(), _create_node_config(), NATIVE_MOSAIC_INFO)
 
 
 def _create_facade_with_database(symbol_db):
-	facade = SymbolRestFacade(
-		create_unreachable_db_configuration(),
-		_create_node_config())
-	facade.symbol_db = symbol_db
-	facade.db_error = None
-	return facade
+	return SymbolRestFacade(symbol_db, _create_node_config(), NATIVE_MOSAIC_INFO)
 
 
 class SymbolRestFacadeTest(TestCase):  # pylint: disable=too-many-public-methods
-	def test_rejects_missing_db_config(self):
+	def test_get_transactions_passes_query(self):
+		# Arrange:
+		query = TransactionQuery()
+		symbol_db = TransactionSymbolDatabase([])
+		facade = _create_facade_with_database(symbol_db)
+
+		# Act:
+		result = facade.get_transactions(query)
+
+		# Assert:
+		self.assertIs(query, symbol_db.query)
+		self.assertEqual([], result)
+
+	def test_rejects_missing_database(self):
 		# Arrange:
 		node_config = _create_node_config()
 
 		# Act + Assert:
 		with self.assertRaisesRegex(
 			ValueError,
-			'Symbol database configuration is required'
+			'Symbol database is required'
 		):
-			SymbolRestFacade(None, node_config)
+			SymbolRestFacade(None, node_config, NATIVE_MOSAIC_INFO)
 
 	def test_rejects_missing_node_config(self):
 		# Act + Assert:
@@ -185,32 +213,12 @@ class SymbolRestFacadeTest(TestCase):  # pylint: disable=too-many-public-methods
 			ValueError,
 			'Symbol node configuration is required'
 		):
-			SymbolRestFacade(create_unreachable_db_configuration(), None)
+			SymbolRestFacade(object(), None, NATIVE_MOSAIC_INFO)
 
-	def test_reports_configured_when_dependencies_are_available(self):
-		# Arrange:
-		facade = _create_configured_facade()
-
-		# Act + Assert:
-		self.assertTrue(facade.is_configured())
-
-	def test_reports_configured_core_status_when_available(self):
-		# Arrange:
-		facade = _create_configured_facade()
-
-		# Act:
-		result = facade.get_core_status()
-
-		# Assert:
-		self.assertEqual({
-			'isConfigured': True,
-			'node': {
-				'baseUrl': NODE_URL,
-				'allowPrivate': False,
-				'allowLoopback': True,
-				'timeoutSeconds': 10
-			}
-		}, result)
+	def test_rejects_missing_native_mosaic_info(self):
+		# Arrange + Act + Assert:
+		with self.assertRaisesRegex(ValueError, 'Native mosaic information is required'):
+			SymbolRestFacade(object(), _create_node_config(), None)
 
 	def test_reports_healthy_core_when_dependencies_are_available(self):
 		# Arrange:
@@ -278,36 +286,6 @@ class SymbolRestFacadeTest(TestCase):  # pylint: disable=too-many-public-methods
 			}]
 		), result)
 
-	def test_reports_unconfigured_when_database_initialization_fails(self):
-		# Arrange:
-		node_config = _create_node_config()
-
-		# Act:
-		facade = SymbolRestFacade(
-			db_config=create_unreachable_db_configuration(),
-			node_config=node_config)
-
-		# Assert:
-		self.assertFalse(facade.is_configured())
-
-	def test_reports_database_initialization_error(self):
-		# Arrange:
-		node_config = _create_node_config()
-		facade = SymbolRestFacade(
-			db_config=create_unreachable_db_configuration(),
-			node_config=node_config)
-
-		# Act:
-		result = facade.get_health()
-
-		# Assert:
-		self.assertEqual(create_symbol_health(
-			errors=[{
-				'type': 'database',
-				'message': 'Symbol database is unavailable'
-			}]
-		), result)
-
 	def test_reports_unhealthy_rollback_state(self):
 		# Arrange:
 		facade = _create_facade_with_database(UnhealthySymbolDatabase())
@@ -369,39 +347,21 @@ class SymbolRestFacadeTest(TestCase):  # pylint: disable=too-many-public-methods
 		self.assertEqual(2, facade.symbol_db.from_height)
 		self.assertEqual(SortOrder.DESC, facade.symbol_db.sort)
 
-	def test_get_blocks_returns_none_when_database_is_unavailable(self):
-		# Arrange:
-		facade = SymbolRestFacade(
-			create_unreachable_db_configuration(),
-			_create_node_config())
-
-		# Act + Assert:
-		self.assertFalse(facade.is_database_available())
-		self.assertIsNone(
-			facade.get_blocks(from_height=None, limit=1, sort=SortOrder.DESC))
-
-	def test_get_blocks_returns_none_when_backend_data_is_unavailable(self):
-		# Arrange:
-		facade = _create_facade_with_database(
-			BlockSymbolDatabase(head_height=None))
-
-		# Act + Assert:
-		self.assertFalse(facade.is_block_data_available())
-		self.assertIsNone(
-			facade.get_blocks(from_height=None, limit=1, sort=SortOrder.DESC))
-
-	def test_get_blocks_returns_none_when_database_returns_none(self):
-		# Arrange:
-		facade = _create_facade_with_database(BlockSymbolDatabase(blocks=None))
-
-		# Act + Assert:
-		self.assertIsNone(
-			facade.get_blocks(from_height=None, limit=1, sort=SortOrder.DESC))
-
 	def test_get_blocks_raises_when_database_read_fails(self):
+		# Arrange:
+		facade = _create_facade_with_database(BlocksReadErrorSymbolDatabase())
+
 		# Act + Assert:
 		with self.assertRaises(PsycopgError):
-			_create_facade_with_database(BlockHeadHeightErrorSymbolDatabase()).get_blocks(1, 10, SortOrder.DESC)
+			facade.get_blocks(1, 10, SortOrder.DESC)
+
+	def test_get_blocks_propagates_unreadable_data(self):
+		# Arrange:
+		facade = _create_facade_with_database(UnreadableBlocksSymbolDatabase())
+
+		# Act + Assert:
+		with self.assertRaises(SymbolDataUnavailable):
+			facade.get_blocks(1, 10, SortOrder.DESC)
 
 	def test_can_get_block_detail(self):
 		# Arrange:
@@ -417,16 +377,64 @@ class SymbolRestFacadeTest(TestCase):  # pylint: disable=too-many-public-methods
 		# Act + Assert:
 		self.assertIsNone(facade.get_block(2))
 
-	def test_get_block_returns_none_when_database_is_unavailable(self):
-		# Arrange:
-		facade = SymbolRestFacade(
-			create_unreachable_db_configuration(),
-			_create_node_config())
-
-		# Act + Assert:
-		self.assertIsNone(facade.get_block(1))
-
 	def test_get_block_raises_when_database_read_fails(self):
 		# Act + Assert:
 		with self.assertRaises(PsycopgError):
 			_create_facade_with_database(BlockReadErrorSymbolDatabase()).get_block(1)
+
+	def test_can_get_receipts(self):
+		# Arrange:
+		receipt = ReceiptRecord(
+			1234,
+			'harvestFee',
+			'balanceChange',
+			1,
+			None,
+			None,
+			bytes.fromhex('98534F7E1D0A26CA4E316F901E23E55C8701DB20DF11A7B2'),
+			'72C0212E67A08BCE',
+			1234567,
+			None,
+			None)
+		symbol_db = ReceiptSymbolDatabase([receipt])
+		facade = _create_facade_with_database(symbol_db)
+
+		# Act:
+		result = facade.get_receipts(ReceiptQuery(10, 0, None, 'balanceChange'))
+
+		# Assert:
+		self.assertEqual([{
+			'version': 1,
+			'height': 1234,
+			'type': 'harvestFee',
+			'group': 'balanceChange',
+			'targetAddress': 'TBJU67Q5BITMUTRRN6IB4I7FLSDQDWZA34I2PMQ',
+			'sender': None,
+			'to': None,
+			'artifactId': None,
+			'mosaics': [{
+				'id': '72C0212E67A08BCE',
+				'name': '72C0212E67A08BCE',
+				'amount': 1.234567,
+				'isNative': True
+			}]
+		}], result)
+		self.assertEqual(ReceiptQuery(10, 0, None, 'balanceChange'), symbol_db.query)
+
+	def test_get_receipts_returns_none_when_database_has_no_block(self):
+		# Arrange:
+		facade = _create_facade_with_database(ReceiptSymbolDatabase(None))
+
+		# Act:
+		result = facade.get_receipts(ReceiptQuery(height=1234))
+
+		# Assert:
+		self.assertIsNone(result)
+
+	def test_receipts_db_error_propagates(self):
+		# Arrange:
+		facade = _create_facade_with_database(ReceiptReadErrorSymbolDatabase())
+
+		# Act + Assert:
+		with self.assertRaises(PsycopgError):
+			facade.get_receipts(ReceiptQuery())

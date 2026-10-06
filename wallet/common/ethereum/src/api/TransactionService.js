@@ -1,15 +1,18 @@
 import { GAS_LIMIT_SAFETY_MARGIN_PERCENTAGE, TransactionType } from '../constants';
 import { createEthereumJrpcProvider, getUnresolvedIdsFromTransactionDTOs, transactionFromDTO, transactionToEthereum } from '../utils';
-import { ApiError } from 'wallet-common-core';
+import { ApiError, TransactionBundle } from 'wallet-common-core';
 import { TransactionGroup } from 'wallet-common-core/src/constants';
 
 // Uniswap V3 swaps require a prior ERC-20 approve, so estimateGas always fails in isolation.
-// Use a conservative fixed gas limit that covers typical V3 exactInputSingle calls.
+// Fixed conservative gas limit sufficient for standard V3 exactInputSingle calls.
 const UNISWAP_SWAP_GAS_LIMIT = '300000';
 
-// eth_estimateGas may underestimate the required gas for some contract calls 
-// (for example due to internal calls, proxy contracts, or EIP-150 gas forwarding). 
-// Apply a safety margin to reduce the chance of on-chain out-of-gas reverts.
+// A bridge transfer spends wrapped tokens the account receives only after the preceding swap runs,
+// so estimateGas fails beforehand.
+// Fixed conservative gas limit sufficient for typical ERC-20 transfer. Unused gas is refunded.
+const ERC20_BRIDGE_TRANSFER_GAS_LIMIT = '100000';
+
+// Safety margin to lower the chance of the gas underestimation (because of EIP-150 gas forwarding, proxy contracts, or internal calls).
 const applyGasLimitSafetyMargin = gasLimit => gasLimit + ((gasLimit * GAS_LIMIT_SAFETY_MARGIN_PERCENTAGE) / 100n);
 
 /** @typedef {import('../types/Account').PublicAccount} PublicAccount */
@@ -22,11 +25,8 @@ export class TransactionService {
 	/** @type {import('../api').Api} */
 	#api;
 
-	#makeRequest;
-
 	constructor(options) {
 		this.#api = options.api;
-		this.#makeRequest = options.makeRequest;
 	}
 
 	/**
@@ -63,7 +63,7 @@ export class TransactionService {
 
 		const transaction = await provider.getTransaction(transactionHash);
 
-		if (!transaction) 
+		if (!transaction)
 			throw new ApiError(`Transaction with hash ${transactionHash} not found`);
 
 		return this.resolveTransactionDTOs(networkProperties, [transaction], currentAccount);
@@ -81,18 +81,18 @@ export class TransactionService {
 
 		const transaction = await provider.getTransaction(transactionHash);
 
-		if (!transaction) 
+		if (!transaction)
 			throw new ApiError(`Transaction with hash ${transactionHash} not found`);
 
 		if (!transaction.blockNumber)
 			return { group: TransactionGroup.UNCONFIRMED };
-		
+
 		const receipt = await provider.getTransactionReceipt(transactionHash);
 
-		if (!receipt) 
+		if (!receipt)
 			return { group: TransactionGroup.UNCONFIRMED };
 
-		if (receipt.status === 1) 
+		if (receipt.status === 1)
 			return { group: TransactionGroup.CONFIRMED };
 
 		return { group: TransactionGroup.FAILED };
@@ -148,6 +148,9 @@ export class TransactionService {
 
 			return applyGasLimitSafetyMargin(gasLimit).toString();
 		} catch (error) {
+			if (transaction.type === TransactionType.ERC_20_BRIDGE_TRANSFER)
+				return ERC20_BRIDGE_TRANSFER_GAS_LIMIT;
+
 			throw new ApiError(`Gas limit estimation failed: ${error.message}`);
 		}
 	};
@@ -187,7 +190,7 @@ export class TransactionService {
 			blockInfosPromise,
 			tokenInfosPromise
 		]);
-		
+
 		const config = {
 			blocks,
 			tokenInfos,

@@ -62,8 +62,7 @@ export const useMosaicTransaction = ({
 	 * @returns {TransactionConfirmationDialogSection[]}
 	 */
 	const getConfirmationPreview = transactionBundle => {
-		const { chainName, networkIdentifier, modules: { addressBook }, accounts } = walletController;
-		const walletAccounts = accounts;
+		const { chainName } = walletController;
 
 		const createMosaicCreationTableData = transaction => {
 			const [definitionTransaction, supplyChangeTransaction] = transaction.innerTransactions;
@@ -75,7 +74,7 @@ export const useMosaicTransaction = ({
 				mosaicId: definitionTransaction.mosaicId,
 				divisibility: definitionTransaction.divisibility,
 				supply: absoluteToRelativeAmount(supplyChangeTransaction.delta, definitionTransaction.divisibility),
-				duration: isExpiring ? definitionTransaction.duration : $t('data_unlimited'),
+				duration: isExpiring ? definitionTransaction.duration : $t('fieldValue_unlimited'),
 				isSupplyMutable: definitionTransaction.isSupplyMutable,
 				isTransferable: definitionTransaction.isTransferable,
 				isRestrictable: definitionTransaction.isRestrictable,
@@ -93,9 +92,6 @@ export const useMosaicTransaction = ({
 				id: `section_${index}`,
 				title: '',
 				chainName,
-				networkIdentifier,
-				addressBook,
-				walletAccounts,
 				tableData
 			};
 		});
