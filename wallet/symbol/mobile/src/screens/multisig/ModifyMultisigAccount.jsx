@@ -15,7 +15,7 @@ import {
 	TransactionScreenTemplate
 } from '@/app/components';
 import { useStandardTransactionWorkflow } from '@/app/components/templates/TransactionScreenTemplate/hooks';
-import { useAsyncManager, useDebounce, useTransactionFees, useWalletController } from '@/app/hooks';
+import { useAccountDisplayData, useAsyncManager, useDebounce, useTransactionFees, useWalletController } from '@/app/hooks';
 import { $t } from '@/app/localization';
 import { Router } from '@/app/router/Router';
 import { CosignatoryList, CosignatureCounter } from '@/app/screens/multisig/components';
@@ -44,21 +44,18 @@ export const ModifyMultisigAccount = props => {
 	const { chainName, accountAddress, preloadedData } = props.route.params;
 	const walletController = useWalletController(chainName);
 	const {
-		networkIdentifier,
-		accounts,
 		currentAccount,
 		ticker
 	} = walletController;
-	const walletAccounts = accounts[networkIdentifier];
-	const { addressBook, multisig: multisigModule } = walletController.modules;
+	const { multisig: multisigModule } = walletController.modules;
 
-	// New account
 	// Fetch multisig account data
 	const dataManager = useAsyncManager({
 		callback: async () => multisigModule.fetchAccountInfo(accountAddress),
 		defaultData: preloadedData
 	});
 	const multisigAccountInfo = dataManager.data;
+	const [multisigAccountDisplayData] = useAccountDisplayData(multisigAccountInfo ? [multisigAccountInfo.address] : [], chainName);
 	useEffect(() => {
 		dataManager.call();
 	}, []);
@@ -140,25 +137,24 @@ export const ModifyMultisigAccount = props => {
 			walletController={walletController}
 			workflow={workflow}
 			isCustomSendButtonUsed={true}
-			confirmDialogTitle={$t('s_multisig_modify_dialog_confirm_title')}
-			confirmDialogText={$t('s_multisig_modify_dialog_confirm_text', {
+			confirmDialogTitle={$t('screen_multisig_modify_dialog_confirm_title')}
+			confirmDialogText={$t('screen_multisig_modify_dialog_confirm_description', {
 				address: accountAddress,
 				cosignatoriesCount
 			})}
 			modals={(
 				<DialogBox
 					isVisible={isInputDialogVisible}
-					title={$t('s_multisig_create_dialog_addCosignatory_title')}
+					title={$t('screen_multisig_dialog_addCosignatory_title')}
 					type="confirm"
 					onSuccess={submitInput}
 					onCancel={closeInputDialog}
 				>
 					<Stack>
 						<InputAddress
-							label={$t('input_address')}
+							label={$t('inputLabel_address')}
 							extraValidators={[validateAddress(chainName)]}
-							addressBook={addressBook}
-							accounts={walletAccounts}
+							chainName={chainName}
 							value={cosignatoryInput}
 							onChange={inputCosignatory}
 						/>
@@ -172,22 +168,19 @@ export const ModifyMultisigAccount = props => {
 						<Stack>
 							<Stack gap="none">
 								<StyledText type="title">
-									{$t('s_multisig_modify_title')}
+									{$t('screen_multisig_modify_title_intro')}
 								</StyledText>
 								<StyledText type="body">
-									{$t('s_multisig_modify_description')}
+									{$t('screen_multisig_modify_description_intro')}
 								</StyledText>
 							</Stack>
 							{multisigAccountInfo && (
 								<AccountListItem
 									address={multisigAccountInfo.address}
-									balance={multisigAccountInfo.balance}
+									name={multisigAccountDisplayData?.name ?? $t('screen_multisig_title_defaultAccountName')}
+									amount={multisigAccountInfo.balance}
 									ticker={ticker}
-									walletAccounts={walletAccounts}
-									addressBook={addressBook}
-									chainName={chainName}
-									networkIdentifier={networkIdentifier}
-									defaultName={$t('s_multisig_defaultAccountName')}
+									imageId={multisigAccountDisplayData?.imageId}
 								/>
 							)}
 						</Stack>
@@ -197,10 +190,10 @@ export const ModifyMultisigAccount = props => {
 						<Stack>
 							<Stack gap="none">
 								<StyledText type="title">
-									{$t('s_multisig_cosignatory_title')}
+									{$t('screen_multisig_title_cosignatory')}
 								</StyledText>
 								<StyledText type="body">
-									{$t('s_multisig_cosignatory_description')}
+									{$t('screen_multisig_description_cosignatory')}
 								</StyledText>
 							</Stack>
 							{cosignatoryAlert.isVisible && (
@@ -214,9 +207,6 @@ export const ModifyMultisigAccount = props => {
 									isEditable
 									cosignatories={cosignatories}
 									chainName={chainName}
-									networkIdentifier={networkIdentifier}
-									walletAccounts={walletAccounts}
-									addressBook={addressBook}
 									onRemove={removeCosignatory}
 								/>
 							)}
@@ -234,10 +224,10 @@ export const ModifyMultisigAccount = props => {
 						<Stack>
 							<Stack gap="none">
 								<StyledText type="title">
-									{$t('s_multisig_approvals_title')}
+									{$t('screen_multisig_title_approvals')}
 								</StyledText>
 								<StyledText type="body">
-									{$t('s_multisig_approvals_description')}
+									{$t('screen_multisig_description_approvals')}
 								</StyledText>
 							</Stack>
 							<Field title={$t('fieldTitle_minApprovals')}>

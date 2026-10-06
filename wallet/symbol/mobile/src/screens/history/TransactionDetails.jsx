@@ -36,7 +36,6 @@ import {
 	isTransactionDangerous
 } from '@/app/screens/history/utils';
 import { createExplorerTransactionUrl } from '@/app/utils';
-import React from 'react';
 
 
 /** @typedef {import('@/app/types/Network').ChainName} ChainName */
@@ -143,7 +142,7 @@ export const TransactionDetails = ({ route }) => {
 							<StyledText type="title">
 								{transactionTypeText}
 							</StyledText>
-							<Field title={$t('s_transactionDetails_amount')}>
+							<Field title={$t('fieldTitle_amount')}>
 								<Amount
 									value={amountBreakdownDisplayData.currentAccount.amountText}
 									ticker={ticker}
@@ -152,14 +151,14 @@ export const TransactionDetails = ({ route }) => {
 								/>
 							</Field>
 							<Columns>
-								<Field title={$t('s_transactionDetails_status')}>
+								<Field title={$t('fieldTitle_status')}>
 									<StatusRow
 										variant={statusDisplayData.variant}
 										statusText={statusDisplayData.text}
 										icon={statusDisplayData.iconName}
 									/>
 								</Field>
-								<Field title={$t('s_transactionDetails_date')}>
+								<Field title={$t('fieldTitle_date')}>
 									<StyledText>
 										{dateText}
 									</StyledText>
@@ -191,11 +190,7 @@ export const TransactionDetails = ({ route }) => {
 												<Divider inverse />
 												<TableView
 													data={cardData.table}
-													addressBook={addressBook}
-													walletAccounts={walletController.accounts}
 													chainName={chainName}
-													networkIdentifier={networkIdentifier}
-													translate={$t}
 													isTitleTranslatable
 												/>
 											</Stack>
@@ -215,18 +210,14 @@ export const TransactionDetails = ({ route }) => {
 						</Stack>
 						<TableView
 							data={transactionBaseTableData}
-							addressBook={addressBook}
-							walletAccounts={walletController.accounts}
 							chainName={chainName}
-							networkIdentifier={networkIdentifier}
-							translate={$t}
 							isTitleTranslatable
 						/>
 						{amountBreakdownDisplayData.isBreakdownVisible && (
 							<Stack>
 								<Divider />
 								<StyledText type="title" size="s">
-									{$t('s_transactionDetails_amountBreakdown_title')}
+									{$t('screen_history_title_amountBreakdown')}
 								</StyledText>
 								<AmountBreakdown breakdown={amountBreakdownDisplayData.breakdown} />
 							</Stack>
@@ -252,16 +243,16 @@ export const TransactionDetails = ({ route }) => {
 			<Screen.Modals>
 				<DialogBox
 					type="confirm"
-					title={$t('s_transactionDetails_cosignDialog_confirm_title')}
-					text={$t('s_transactionDetails_cosignDialog_confirm_text')}
+					title={$t('screen_history_cosign_dialog_confirm_title')}
+					text={$t('screen_history_cosign_dialog_confirm_description')}
 					isVisible={cosignFlow.confirmationDialogProps.isVisible}
 					onSuccess={cosignFlow.confirmationDialogProps.onConfirm}
 					onCancel={cosignFlow.confirmationDialogProps.onCancel}
 				/>
 				<DialogBox
 					type="alert"
-					title={$t('s_transactionDetails_cosignDialog_success_title')}
-					text={$t('s_transactionDetails_cosignDialog_success_text')}
+					title={$t('screen_history_cosign_dialog_success_title')}
+					text={$t('screen_history_cosign_dialog_success_description')}
 					isVisible={cosignFlow.successDialogProps.isVisible}
 					onSuccess={cosignFlow.successDialogProps.onSuccess}
 				/>
