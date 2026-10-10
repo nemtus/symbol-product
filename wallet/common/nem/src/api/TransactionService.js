@@ -33,7 +33,7 @@ export class TransactionService {
 		if (group === TransactionGroup.PARTIAL)
 			return [];
 
-		let transactionDTOs = [];
+		let transactionDTOs;
 
 		if (group === TransactionGroup.UNCONFIRMED) {
 			const url = `${networkProperties.nodeUrl}/account/unconfirmedTransactions?address=${address}`;
@@ -69,7 +69,7 @@ export class TransactionService {
 			[transactionDTO],
 			currentAccount
 		);
-		
+
 		return transactions[0];
 	};
 
@@ -82,12 +82,12 @@ export class TransactionService {
 	fetchTransactionStatus = async (networkProperties, hash) => {
 		try {
 			await this.#makeRequest(`${networkProperties.nodeUrl}/transaction/get?hash=${hash}`);
-			
+
 			return { group: TransactionGroup.CONFIRMED };
 		} catch (error) {
 			if (error instanceof NotFoundError)
 				return { group: TransactionGroup.UNCONFIRMED };
-			
+
 			throw error;
 		}
 	};
@@ -117,6 +117,7 @@ export class TransactionService {
 			for (let i = 0; i < transactions.length; i++) {
 				const tx = transactions[i];
 				const group = metadata?.groups?.[i] || TransactionAnnounceGroup.DEFAULT;
+				// eslint-disable-next-line no-await-in-loop
 				results.push(await this.announceTransaction(networkProperties, tx, group));
 			}
 			return results;
@@ -155,31 +156,31 @@ export class TransactionService {
 	};
 
 	/**
-	 * Resolves the mosaic infos referenced by a list of transaction DTOs.
+	 * Resolves the token infos referenced by a list of transaction DTOs.
 	 * @param {NetworkProperties} networkProperties - Network properties.
 	 * @param {object[]} transactionDTOs - The transaction DTOs to resolve.
-	 * @returns {Promise<Record<string, object>>} The mosaic id to info map (empty when nothing to resolve).
+	 * @returns {Promise<Record<string, object>>} The token id to info map (empty when nothing to resolve).
 	 */
 	resolveTransactionData = async (networkProperties, transactionDTOs) => {
-		const { mosaicIds } = getUnresolvedIdsFromTransactionDTOs(transactionDTOs);
-		
-		if (!mosaicIds.length)
+		const { tokenIds } = getUnresolvedIdsFromTransactionDTOs(transactionDTOs);
+
+		if (!tokenIds.length)
 			return {};
-		
-		return this.#api.mosaic.fetchMosaicInfos(networkProperties, mosaicIds);
+
+		return this.#api.token.fetchTokenInfos(networkProperties, tokenIds);
 	};
 
 	/**
-	 * Maps a list of transaction DTOs to Transaction objects, resolving their referenced mosaics first.
+	 * Maps a list of transaction DTOs to Transaction objects, resolving their referenced tokens first.
 	 * @param {NetworkProperties} networkProperties - Network properties.
 	 * @param {object[]} transactionDTOs - The transaction DTOs to map.
 	 * @param {PublicAccount} currentAccount - The account used to derive the directed amount.
 	 * @returns {Promise<Transaction[]>} The mapped transactions.
 	 */
 	resolveTransactionDTOs = async (networkProperties, transactionDTOs, currentAccount) => {
-		const mosaicInfos = await this.resolveTransactionData(networkProperties, transactionDTOs);
-		
+		const tokenInfos = await this.resolveTransactionData(networkProperties, transactionDTOs);
+
 		return transactionDTOs.map(dto =>
-			transactionFromDTO(dto, { networkProperties, currentAccount, mosaicInfos }));
+			transactionFromDTO(dto, { networkProperties, currentAccount, tokenInfos }));
 	};
 }

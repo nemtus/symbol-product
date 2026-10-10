@@ -19,22 +19,21 @@ const PRICE = 0.05;
 
 const SCREEN_TEXT = {
 	// Screen content
-	textTitle: 's_send_title',
-	textDescription: 's_send_description',
+	textTitle: 'screen_send_title_intro',
+	textDescription: 'screen_send_description_intro',
 
 	// Input labels
-	inputRecipientLabel: 'input_recipient',
-	inputMosaicLabel: 'input_mosaic',
-	inputAmountLabel: 'input_amount',
-	inputMessageLabel: 'input_message',
-	inputSenderLabel: 'input_sender',
+	inputRecipientLabel: 'inputLabel_recipient',
+	inputTokenLabel: 'inputLabel_token',
+	inputAmountLabel: 'inputLabel_amount',
+	inputMessageLabel: 'inputLabel_message',
 
 	// Sender selector tabs
-	senderTabCurrentAccount: 'c_selectTransactionSender_currentAccount',
-	senderTabMultisigAccount: 'c_selectTransactionSender_multisigAccount',
+	senderTabCurrentAccount: 'component_selectTransactionSender_tab_currentAccount',
+	senderTabMultisigAccount: 'component_selectTransactionSender_tab_multisigAccount',
 
 	// Checkbox
-	checkboxEncrypted: 'input_encrypted',
+	checkboxEncrypted: 'inputLabel_encrypted',
 
 	// Buttons
 	buttonSend: 'button_send'
@@ -85,7 +84,6 @@ const regularAccountInfo = AccountInfoFixtureBuilder
 	.override({
 		address: currentAccount.address,
 		publicKey: currentAccount.publicKey,
-		mosaics: TOKEN_LIST,
 		tokens: TOKEN_LIST,
 		isMultisig: false,
 		cosignatories: [],
@@ -98,7 +96,6 @@ const cosignatoryAccountInfo = AccountInfoFixtureBuilder
 	.override({
 		address: currentAccount.address,
 		publicKey: currentAccount.publicKey,
-		mosaics: TOKEN_LIST,
 		tokens: TOKEN_LIST,
 		isMultisig: false,
 		cosignatories: [],
@@ -166,7 +163,6 @@ const createMockMultisigModule = (overrides = {}) => ({
 const createMockNetworkApi = (overrides = {}) => ({
 	account: {
 		fetchAccountInfo: jest.fn().mockResolvedValue({
-			mosaics: TOKEN_LIST,
 			tokens: TOKEN_LIST,
 			publicKey: currentAccount.publicKey
 		}),
@@ -252,7 +248,7 @@ describe('screens/send/Send', () => {
 				SCREEN_TEXT.textTitle,
 				SCREEN_TEXT.textDescription,
 				SCREEN_TEXT.inputRecipientLabel,
-				SCREEN_TEXT.inputMosaicLabel,
+				SCREEN_TEXT.inputTokenLabel,
 				SCREEN_TEXT.inputAmountLabel,
 				SCREEN_TEXT.inputMessageLabel,
 				SCREEN_TEXT.checkboxEncrypted,

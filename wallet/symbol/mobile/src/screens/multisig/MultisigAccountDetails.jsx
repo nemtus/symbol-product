@@ -12,12 +12,12 @@ import {
 	StyledText,
 	TokenListItem
 } from '@/app/components';
-import { useAsyncManager, useWalletController } from '@/app/hooks';
+import { useAccountDisplayData, useAsyncManager, useWalletController } from '@/app/hooks';
 import { PlatformUtils } from '@/app/lib/platform/PlatformUtils';
 import { $t } from '@/app/localization';
 import { Router } from '@/app/router/Router';
 import { CosignatoryList, CosignatureCounter } from '@/app/screens/multisig/components';
-import { createAccountAddressQr, createAccountDisplayData, createExplorerAccountUrl } from '@/app/utils';
+import { createAccountAddressQr, createExplorerAccountUrl, createTokenDisplayData } from '@/app/utils';
 import React from 'react';
 
 /** @typedef {import('@/app/types/Network').ChainName} ChainName */
@@ -28,7 +28,7 @@ import React from 'react';
  * @returns {string} The display name.
  */
 const getAccountNameText = name => {
-	return name ?? $t('s_multisig_defaultAccountName');
+	return name ?? $t('screen_multisig_title_defaultAccountName');
 };
 
 /**
@@ -46,9 +46,8 @@ const getAccountNameText = name => {
 export const MultisigAccountDetails = ({ route }) => {
 	const { chainName, accountAddress, preloadedData } = route.params;
 	const walletController = useWalletController(chainName);
-	const { networkIdentifier, accounts } = walletController;
-	const walletAccounts = accounts[networkIdentifier];
-	const { addressBook, multisig: multisigModule } = walletController.modules;
+	const { networkIdentifier } = walletController;
+	const { multisig: multisigModule } = walletController.modules;
 
 	// Fetch multisig account data
 	const dataManager = useAsyncManager({
@@ -59,16 +58,12 @@ export const MultisigAccountDetails = ({ route }) => {
 
 	// Account info
 	const { address, minApproval, minRemoval, cosignatories } = data;
-	const accountDisplay = createAccountDisplayData(address, {
-		walletAccounts,
-		addressBook,
-		chainName,
-		networkIdentifier
-	});
-	const accountNameText = getAccountNameText(accountDisplay.name);
+	const accountDisplayData = useAccountDisplayData(address, chainName);
+	const accountNameText = getAccountNameText(accountDisplayData.name);
 
 	// Tokens
-	const tokens = data?.tokens || data?.mosaics || [];
+	const tokens = data?.tokens || [];
+	const tokensDisplayData = tokens.map(token => createTokenDisplayData(token, chainName, networkIdentifier));
 
 	// Send/Receive buttons
 	const receiveQrData = createAccountAddressQr({
@@ -114,7 +109,7 @@ export const MultisigAccountDetails = ({ route }) => {
 							address={address}
 							name={accountNameText}
 							chainName={chainName}
-							imageId={accountDisplay.imageId}
+							imageId={accountDisplayData.imageId}
 						/>
 						<SendReceiveButtons
 							accountAddress={address}
@@ -125,7 +120,7 @@ export const MultisigAccountDetails = ({ route }) => {
 					</Stack>
 					<Stack gap="s">
 						<StyledText type="title">
-							{$t('s_multisig_multisigInfo_title')}
+							{$t('screen_multisig_title_multisigInfo')}
 						</StyledText>
 						<Card>
 							<Spacer>
@@ -148,9 +143,6 @@ export const MultisigAccountDetails = ({ route }) => {
 										<CosignatoryList
 											cosignatories={cosignatories}
 											chainName={chainName}
-											networkIdentifier={networkIdentifier}
-											walletAccounts={walletAccounts}
-											addressBook={addressBook}
 										/>
 									</Field>
 								</Stack>
@@ -159,17 +151,21 @@ export const MultisigAccountDetails = ({ route }) => {
 					</Stack>
 					<Stack gap="s">
 						<StyledText type="title">
-							{$t('s_multisig_tokens_title')}
+							{$t('screen_multisig_title_tokens')}
 						</StyledText>
-						{tokens.map(token => (
-							<TokenListItem
-								key={token.id}
-								token={token}
-								chainName={chainName}
-								networkIdentifier={networkIdentifier}
-								onPress={handleTokenPress}
-							/>
-						))}
+						{tokens.map((token, index) => {
+							const tokenDisplayData = tokensDisplayData[index];
+
+							return (
+								<TokenListItem
+									key={token.id}
+									name={tokenDisplayData.nameText}
+									amount={tokenDisplayData.amount}
+									imageId={tokenDisplayData.imageId}
+									onPress={() => handleTokenPress(token)}
+								/>
+							);
+						})}
 						{tokens.length === 0 && (
 							<EmptyListMessage />
 						)}

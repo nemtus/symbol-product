@@ -5,8 +5,9 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest import TestCase
 
+import pytest
 from common.symbol.NodeConfiguration import SymbolNodeConfiguration
-from common.tests.PostgresTestUtils import PostgresTestDatabase, drop_symbol_block_tables_if_present
+from common.tests.PostgresTestUtils import drop_symbol_block_tables_if_present
 from symbolchain.sc import ReceiptType, TransactionType
 from symbolchain.symbol.Network import Address, Network
 
@@ -17,6 +18,19 @@ from tests.test.SymbolTestConstants import BENEFICIARY_ADDRESS, RECIPIENT_ADDRES
 NODE_URL = 'http://127.0.0.1:3000'
 NATIVE_MOSAIC_ID = '72C0212E67A08BCE'
 NATIVE_MOSAIC_DIVISIBILITY = 6
+
+
+class RecordingCleanupLogger:
+	"""Records cleanup messages and can emulate a logger failure."""
+
+	def __init__(self, logging_error=None):
+		self.logging_error = logging_error
+		self.messages = []
+
+	def error(self, message):
+		self.messages.append(message)
+		if self.logging_error:
+			raise self.logging_error
 
 
 class DelegatingSymbolDatabase:
@@ -78,13 +92,14 @@ def create_symbol_puller(  # pylint: disable=too-many-arguments,too-many-positio
 		puller_kwargs['time_source'] = time_source
 	if performance_logger is not None:
 		puller_kwargs['performance_logger'] = performance_logger
+	if connector is not None:
+		puller_kwargs['connector_factory'] = lambda _endpoint, _timeout_seconds, _connection_limit: connector
 
 	puller = SymbolPuller(
 		node_url,
 		db_config_path,
 		network_type,
 		node_config,
-		connector,
 		max_requests_per_second=1_000_000,
 		rate_limiter=rate_limiter,
 		**puller_kwargs
@@ -137,6 +152,8 @@ def create_node_block(
 	height,
 	block_hash=None,
 	previous_hash=None,
+	transactions_count=0,
+	total_transactions_count=0,
 	**block_overrides
 ):
 	block_hash = block_hash or f'{height:064X}'
@@ -146,8 +163,8 @@ def create_node_block(
 		'meta': {
 			'hash': block_hash,
 			'totalFee': str(height * 1000),
-			'totalTransactionsCount': height + 10,
-			'transactionsCount': height,
+			'totalTransactionsCount': total_transactions_count,
+			'transactionsCount': transactions_count,
 			'statementsCount': height + 1,
 			'stateHashSubCacheMerkleRoots': ['A' * 64]
 		},
@@ -273,6 +290,15 @@ def transaction_path(start_height, end_height, page_number=1):
 	)
 
 
+def create_transaction_page(items, page_number=1, page_size=MAX_PAGE_SIZE):
+	"""Creates an explicit Symbol transaction REST page envelope for tests."""
+
+	return {
+		'data': items,
+		'pagination': {'pageNumber': page_number, 'pageSize': page_size}
+	}
+
+
 def statement_path(start_height, end_height, page_number=1):
 	return (
 		f'statements/transaction?fromHeight={start_height}&toHeight={end_height}'
@@ -385,7 +411,7 @@ def create_network_properties(epoch_adjustment='100s'):
 
 
 def create_mosaic_definition(divisibility=NATIVE_MOSAIC_DIVISIBILITY):
-	return {'mosaic': {'divisibility': divisibility}}
+	return {'mosaic': {'id': NATIVE_MOSAIC_ID, 'divisibility': divisibility}}
 
 
 def create_account_item(address_hex=BENEFICIARY_ADDRESS, item_id='account-id', **account_overrides):
@@ -472,10 +498,9 @@ class FakeConnector:  # pylint: disable=too-many-instance-attributes
 				}
 			}
 		if url_path.startswith('transactions/confirmed?'):
-			response = self.transactions_by_path.get(url_path, {'data': []})
+			response = self.transactions_by_path.get(url_path, create_transaction_page([]))
 			if isinstance(response, Exception):
 				raise response
-
 			return response
 		if url_path.startswith('statements/transaction?'):
 			return self.statement_pages.get(url_path, {'data': []})
@@ -613,6 +638,7 @@ class ResponseConnector:
 	def __init__(self, responses):
 		self.responses = responses
 		self.paths = []
+		self.timeout_seconds = None
 
 	async def get(self, url_path, *_):
 		self.paths.append(url_path)
@@ -653,22 +679,21 @@ class BoundedNamespaceDetailConnector(BoundedDetailConnector):
 		return self.namespace_by_id[url_path.removeprefix('namespaces/')]
 
 
+@pytest.mark.usefixtures('database_config')
 class SymbolPullerTestBase(TestCase):
+	db_config = None  # pylint: disable=invalid-name
+
 	def setUp(self):
 		self.exit_stack = ExitStack()
+		self.addCleanup(self.exit_stack.close)
 		self.config_dir = self.exit_stack.enter_context(
 			tempfile.TemporaryDirectory()
 		)
-		self.db_config = self.exit_stack.enter_context(PostgresTestDatabase())
 		self.config_ini = create_db_config(self.config_dir, self.db_config)
-		self.puller = self.exit_stack.enter_context(
-			create_symbol_puller(self.config_ini, 'testnet')
-		)
+		self.puller = create_symbol_puller(self.config_ini, 'testnet')
+		self.exit_stack.enter_context(self.puller.symbol_db)
 		drop_symbol_block_tables_if_present(self.puller.symbol_db)
 		self.puller.symbol_db.create_tables()
-
-	def tearDown(self):
-		self.exit_stack.close()
 
 	@staticmethod
 	def _fetch_block_heights(database):

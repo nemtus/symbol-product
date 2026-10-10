@@ -46,12 +46,12 @@ const DECRYPTED_MESSAGE_TEXT = 'Secret decrypted message';
 
 const SCREEN_TEXT = {
 	// Field titles
-	textFieldAmount: 's_transactionDetails_amount',
-	textFieldStatus: 's_transactionDetails_status',
-	textFieldDate: 's_transactionDetails_date',
+	textFieldAmount: 'fieldTitle_amount',
+	textFieldStatus: 'fieldTitle_status',
+	textFieldDate: 'fieldTitle_date',
 
 	// Transaction breakdown
-	textAmountBreakdownTitle: 's_transactionDetails_amountBreakdown_title',
+	textAmountBreakdownTitle: 'screen_history_title_amountBreakdown',
 
 	// Transaction statuses
 	textStatusConfirmed: 'transactionStatus_confirmed',
@@ -59,26 +59,26 @@ const SCREEN_TEXT = {
 	textStatusUnconfirmed: 'transactionStatus_unconfirmed',
 
 	// Transaction types
-	textTransactionTransferOutgoing: 'transactionDescriptor_symbol_16724_outgoing',
-	textTransactionAggregateBonded: 'transactionDescriptor_symbol_16961',
-	textTransactionMultisigAccountModification: 'transactionDescriptor_symbol_16725',
+	textTransactionTransferOutgoing: 'transactionType_transferOutgoing',
+	textTransactionAggregateBonded: 'transactionType_aggregateBonded',
+	textTransactionMultisigAccountModification: 'transactionType_multisigAccountModification',
 
 	// Cosign alerts
-	textAlertSigned: 's_transactionDetails_cosignAlert_signed',
-	textAlertAwaitingSignature: 's_transactionDetails_cosignAlert_trustedAccount',
-	textAlertAwaitingOtherSignatures: 's_transactionDetails_cosignAlert_awaitingOtherSignatures',
+	textAlertSigned: 'screen_history_cosign_alert_signed_description',
+	textAlertAwaitingSignature: 'screen_history_cosign_alert_trustedAccount_description',
+	textAlertAwaitingOtherSignatures: 'screen_history_cosign_alert_awaitingOtherSignatures_description',
 
 	// Safety warning
-	textSafetyWarning: 's_transactionDetails_safetyWarning_description',
+	textSafetyWarning: 'screen_history_alert_safetyWarning_description',
 
 	// Message
-	textMessageEncryptedLabel: 'c_messageView_label_encrypted',
+	textMessageEncryptedLabel: 'component_messageView_label_encrypted',
 
 	// Dialog titles and text
-	textDialogConfirmTitle: 's_transactionDetails_cosignDialog_confirm_title',
-	textDialogConfirmText: 's_transactionDetails_cosignDialog_confirm_text',
-	textDialogSuccessTitle: 's_transactionDetails_cosignDialog_success_title',
-	textDialogSuccessText: 's_transactionDetails_cosignDialog_success_text',
+	textDialogConfirmTitle: 'screen_history_cosign_dialog_confirm_title',
+	textDialogConfirmText: 'screen_history_cosign_dialog_confirm_description',
+	textDialogSuccessTitle: 'screen_history_cosign_dialog_success_title',
+	textDialogSuccessText: 'screen_history_cosign_dialog_success_description',
 
 	// Buttons
 	buttonSignAndApprove: 'button_signAndApprove',
@@ -155,7 +155,7 @@ const transferTransaction = TransferTransactionFixtureBuilder
 	.setTimestamp(TRANSACTION_TIMESTAMP)
 	.setSigner(currentAccount)
 	.setRecipientAddress(recipientAccount.address)
-	.setMosaics([tokenXym, tokenCustom])
+	.setTokens([tokenXym, tokenCustom])
 	.setPlainMessage(TRANSFER_MESSAGE_TEXT)
 	.setAmount(`-${TRANSFER_XYM_AMOUNT}`)
 	.build();
@@ -166,7 +166,7 @@ const encryptedTransferTransaction = TransferTransactionFixtureBuilder
 	.setTimestamp(TRANSACTION_TIMESTAMP)
 	.setSigner(currentAccount)
 	.setRecipientAddress(recipientAccount.address)
-	.setMosaics([tokenXym])
+	.setTokens([tokenXym])
 	.setEncryptedMessage(ENCRYPTED_MESSAGE_PAYLOAD)
 	.setAmount(`-${TRANSFER_XYM_AMOUNT}`)
 	.build();
@@ -177,7 +177,7 @@ const innerTransferFromCurrentAccount = TransferTransactionFixtureBuilder
 	.createDefault(CHAIN_NAME, NETWORK_IDENTIFIER)
 	.setSigner(currentAccount)
 	.setRecipientAddress(recipientAccount.address)
-	.setMosaics([tokenXym])
+	.setTokens([tokenXym])
 	.setAmount(`-${TRANSFER_XYM_AMOUNT}`)
 	.build();
 
@@ -185,7 +185,7 @@ const innerTransferFromOtherAccount = TransferTransactionFixtureBuilder
 	.createDefault(CHAIN_NAME, NETWORK_IDENTIFIER)
 	.setSigner(otherSignerAccount)
 	.setRecipientAddress(currentAccount.address)
-	.setMosaics([tokenXym])
+	.setTokens([tokenXym])
 	.setAmount(TRANSFER_XYM_AMOUNT)
 	.build();
 
@@ -237,7 +237,7 @@ const aggregateBondedForCurrentMultisigAccount = AggregateTransactionFixtureBuil
 // Mosaic Supply Change Transaction Fixtures
 
 const MOSAIC_SUPPLY_DELTA = 4242;
-const MOSAIC_SUPPLY_CHANGE_MOSAIC_ID = '0E2B031D9C83906D';
+const MOSAIC_SUPPLY_CHANGE_TOKEN_ID = '0E2B031D9C83906D';
 
 const createMosaicSupplyChangeTransaction = action => ({
 	type: SymbolTransactionType.MOSAIC_SUPPLY_CHANGE,
@@ -245,7 +245,7 @@ const createMosaicSupplyChangeTransaction = action => ({
 	timestamp: TRANSACTION_TIMESTAMP,
 	signerAddress: currentAccount.address,
 	signerPublicKey: currentAccount.publicKey,
-	mosaicId: MOSAIC_SUPPLY_CHANGE_MOSAIC_ID,
+	tokenId: MOSAIC_SUPPLY_CHANGE_TOKEN_ID,
 	action,
 	delta: MOSAIC_SUPPLY_DELTA
 });
@@ -464,16 +464,16 @@ describe('screens/history/TransactionDetails', () => {
 				description: 'renders a decrease as "Decrease by" with a negative delta',
 				config: { transaction: mosaicSupplyDecreaseTransaction },
 				expected: {
-					visibleTexts: ['data_delta_decrease', `-${MOSAIC_SUPPLY_DELTA}`],
-					notVisibleTexts: ['data_delta_increase']
+					visibleTexts: ['fieldValue_deltaDecrease', `-${MOSAIC_SUPPLY_DELTA}`],
+					notVisibleTexts: ['fieldValue_deltaIncrease']
 				}
 			},
 			{
 				description: 'renders an increase as "Increase by" with a positive delta',
 				config: { transaction: mosaicSupplyIncreaseTransaction },
 				expected: {
-					visibleTexts: ['data_delta_increase', `${MOSAIC_SUPPLY_DELTA}`],
-					notVisibleTexts: ['data_delta_decrease']
+					visibleTexts: ['fieldValue_deltaIncrease', `${MOSAIC_SUPPLY_DELTA}`],
+					notVisibleTexts: ['fieldValue_deltaDecrease']
 				}
 			}
 		];

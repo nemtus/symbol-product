@@ -19,7 +19,7 @@ import { PlatformUtils } from '@/app/lib/platform/PlatformUtils';
 import { $t } from '@/app/localization';
 import { Router } from '@/app/router/Router';
 import { createAccountAddressQr, createExplorerAccountUrl } from '@/app/utils';
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { constants } from 'wallet-common-core';
 
 /**
@@ -119,17 +119,13 @@ export const AccountDetails = () => {
 						</Stack>
 						<Stack gap="s">
 							<StyledText type="title">
-								{$t('s_accountDetails_accountInfo_title')}
+								{$t('screen_account_title_accountInfo')}
 							</StyledText>
 							<Card>
 								<Spacer>
 									<TableView
 										data={tableData}
-										addressBook={walletController.modules.addressBook}
-										walletAccounts={walletController.accounts}
 										chainName={chainName}
-										networkIdentifier={networkIdentifier}
-										translate={$t}
 										isTitleTranslatable
 									/>
 								</Spacer>
@@ -161,7 +157,7 @@ export const AccountDetails = () => {
 			<Screen.Modals>
 				<DialogBox
 					type="alert"
-					title={$t('dialog_sensitive')}
+					title={$t('dialog_sensitiveInformation_title')}
 					isVisible={isPrivateKeyDialogShown}
 					onSuccess={togglePrivateKeyDialog}
 				>

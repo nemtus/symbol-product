@@ -4,10 +4,10 @@ import { useEffect } from 'react';
 import { ControllerEventName } from 'wallet-common-core/src/constants';
 
 /** @typedef {import('@/app/types/Wallet').WalletController} WalletController */
-/** @typedef {import('@/app/screens/bridge/types/Bridge').BridgeAccountDisplayData} BridgeAccountDisplayData */
+/** @typedef {import('@/app/screens/bridge/types/ViewModel').BridgeAccountDisplayData} BridgeAccountDisplayData */
 
 /**
- * Fetches account info if the wallet controller is ready.
+ * Fetches account information provided the wallet controller is ready.
  * @param {WalletController} walletController - The wallet controller.
  */
 const fetchAccountInfoIfReady = walletController => {
@@ -16,7 +16,7 @@ const fetchAccountInfoIfReady = walletController => {
 };
 
 /**
- * Creates a bridge account object from a wallet controller.
+ * Creates a bridge account object using a wallet controller.
  * @param {WalletController} walletController - The wallet controller.
  * @returns {BridgeAccountDisplayData} The bridge account object.
  */
@@ -25,21 +25,21 @@ const createBridgeAccountObject = walletController => ({
 	ticker: walletController.ticker,
 	isActive: !!walletController.currentAccount,
 	account: walletController.currentAccount,
-	balance: walletController.currentAccountInfo?.balance || 0,
+	balance: walletController.currentAccountInfo?.balance || '0',
 	tokens: walletController.currentAccountInfo?.tokens || [],
 	isAccountInfoLoaded: walletController.currentAccountInfo?.fetchedAt ? true : false
 });
 
 /**
- * Return type for useBridgeAccounts hook.
+ * Return type of the useBridgeAccounts hook.
  * @typedef {object} UseBridgeAccountsReturnType
  * @property {BridgeAccountDisplayData[]} accounts - Array of bridge account objects from additional wallet controllers.
  * @property {() => void} refresh - Refreshes all account balances.
  */
 
 /**
- * React hook for managing bridge account data from additional wallet controllers.
- * Provides account information and automatic refresh on account/transaction changes.
+ * React hook for managing bridge account data from additional wallet controllers, offering account details and
+ * automatic updates when transactions or accounts change.
  * @returns {UseBridgeAccountsReturnType}
  */
 export const useBridgeAccounts = () => {
@@ -48,7 +48,7 @@ export const useBridgeAccounts = () => {
 	// Accounts data from additional wallet controllers
 	const accounts = walletControllers.map(createBridgeAccountObject);
 
-	// Refreshes all accounts by fetching the latest account info using each wallet controller
+	// Uses each wallet controller to refresh all accounts
 	const refresh = () => {
 		walletControllers.forEach(fetchAccountInfoIfReady);
 	};

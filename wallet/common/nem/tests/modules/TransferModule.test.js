@@ -25,7 +25,7 @@ const multisigDeadline = createDeadline(networkProperties.networkTime, MULTISIG_
 
 // Fixtures
 
-const nativeMosaics = (amount = '10') => [{ id: 'nem.xem', name: 'XEM', amount, divisibility: 6 }];
+const nativeTokens = (amount = '10') => [{ id: 'nem.xem', name: 'XEM', amount, divisibility: 6 }];
 const createFee = amount => createTransactionFee(networkProperties, amount);
 
 const plainMessage = text => ({
@@ -118,7 +118,7 @@ describe('modules/TransferModule', () => {
 				config: {
 					options: {
 						recipientAddress: RECIPIENT_ADDRESS,
-						mosaics: nativeMosaics('10'),
+						tokens: nativeTokens('10'),
 						message: 'Good luck!',
 						isEncrypted: false,
 						fee: createFee('1')
@@ -129,7 +129,7 @@ describe('modules/TransferModule', () => {
 						type: TransactionType.TRANSFER,
 						signerPublicKey: currentAccount.publicKey,
 						recipientAddress: RECIPIENT_ADDRESS,
-						mosaics: nativeMosaics('10'),
+						tokens: nativeTokens('10'),
 						message: plainMessage('Good luck!'),
 						fee: createFee('1'),
 						deadline: singleDeadline
@@ -142,7 +142,7 @@ describe('modules/TransferModule', () => {
 				config: {
 					options: {
 						recipientAddress: RECIPIENT_ADDRESS,
-						mosaics: nativeMosaics('5'),
+						tokens: nativeTokens('5'),
 						fee: createFee('0.5')
 					}
 				},
@@ -151,7 +151,7 @@ describe('modules/TransferModule', () => {
 						type: TransactionType.TRANSFER,
 						signerPublicKey: currentAccount.publicKey,
 						recipientAddress: RECIPIENT_ADDRESS,
-						mosaics: nativeMosaics('5'),
+						tokens: nativeTokens('5'),
 						message: null,
 						fee: createFee('0.5'),
 						deadline: singleDeadline
@@ -164,7 +164,7 @@ describe('modules/TransferModule', () => {
 				config: {
 					options: {
 						recipientAddress: RECIPIENT_ADDRESS,
-						mosaics: nativeMosaics('10')
+						tokens: nativeTokens('10')
 					}
 				},
 				expected: {
@@ -172,7 +172,7 @@ describe('modules/TransferModule', () => {
 						type: TransactionType.TRANSFER,
 						signerPublicKey: currentAccount.publicKey,
 						recipientAddress: RECIPIENT_ADDRESS,
-						mosaics: nativeMosaics('10'),
+						tokens: nativeTokens('10'),
 						message: null,
 						fee: createFee('0'),
 						deadline: singleDeadline
@@ -185,7 +185,7 @@ describe('modules/TransferModule', () => {
 				config: {
 					options: {
 						recipientAddress: RECIPIENT_ADDRESS,
-						mosaics: nativeMosaics('10'),
+						tokens: nativeTokens('10'),
 						message: 'Secret',
 						isEncrypted: true,
 						fee: createFee('3')
@@ -197,7 +197,7 @@ describe('modules/TransferModule', () => {
 						type: TransactionType.TRANSFER,
 						signerPublicKey: currentAccount.publicKey,
 						recipientAddress: RECIPIENT_ADDRESS,
-						mosaics: nativeMosaics('10'),
+						tokens: nativeTokens('10'),
 						message: encryptedMessage('Secret', `ENC(Secret)-with-${bob.publicKey}`),
 						fee: createFee('3'),
 						deadline: singleDeadline
@@ -211,7 +211,7 @@ describe('modules/TransferModule', () => {
 					options: {
 						senderPublicKey: MULTISIG_PUBLIC_KEY,
 						recipientAddress: RECIPIENT_ADDRESS,
-						mosaics: nativeMosaics('10')
+						tokens: nativeTokens('10')
 					}
 				},
 				expected: {
@@ -222,7 +222,7 @@ describe('modules/TransferModule', () => {
 							type: TransactionType.TRANSFER,
 							signerPublicKey: MULTISIG_PUBLIC_KEY,
 							recipientAddress: RECIPIENT_ADDRESS,
-							mosaics: nativeMosaics('10'),
+							tokens: nativeTokens('10'),
 							message: null,
 							fee: createFee('0.05'),
 							deadline: singleDeadline
@@ -238,7 +238,7 @@ describe('modules/TransferModule', () => {
 				config: {
 					options: {
 						recipientAddress: RECIPIENT_ADDRESS,
-						mosaics: nativeMosaics('10'),
+						tokens: nativeTokens('10'),
 						message: 'Secret',
 						isEncrypted: true,
 						fee: createFee('0.1')
@@ -247,8 +247,8 @@ describe('modules/TransferModule', () => {
 				},
 				expected: {
 					error: new ControllerError(
-						'error_transfer_encrypted_message_no_recipient_public_key',
-						`Cannot encrypt message: recipient public key for "${RECIPIENT_ADDRESS}" is unknown`
+						`Cannot encrypt message: recipient public key for "${RECIPIENT_ADDRESS}" is unknown`,
+						'error_transfer_encrypted_message_no_recipient_public_key'
 					),
 					shouldFetchRecipientInfo: true
 				}
@@ -369,9 +369,9 @@ describe('modules/TransferModule', () => {
 				},
 				expected: {
 					error: new ControllerError(
-						'error_failed_decrypt_message_invalid_transaction_type',
 						`Failed to decrypt message. Transaction type "${TransactionType.MULTISIG}" is not supported. `
-						+ `Expected type "${TransactionType.TRANSFER}"`
+						+ `Expected type "${TransactionType.TRANSFER}"`,
+						'error_failed_decrypt_message_invalid_transaction_type'
 					)
 				}
 			},
@@ -388,8 +388,8 @@ describe('modules/TransferModule', () => {
 				},
 				expected: {
 					error: new ControllerError(
-						'error_failed_decrypt_message_not_related',
-						'Failed to decrypt message. Transaction is not related to the current account'
+						'Failed to decrypt message. Transaction is not related to the current account',
+						'error_failed_decrypt_message_not_related'
 					)
 				}
 			}

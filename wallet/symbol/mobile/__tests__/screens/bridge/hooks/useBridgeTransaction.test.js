@@ -6,7 +6,7 @@ import { HookTester } from '__tests__/HookTester';
 import { runHookContractTest } from '__tests__/hook-tests';
 import { createWalletControllerMock } from '__tests__/mock-helpers';
 import { act } from '@testing-library/react-native';
-import { TransactionBundle } from 'wallet-common-core'; // eslint-disable-line import/order
+import { TransactionBundle } from 'wallet-common-core';
 
 // Constants
 
@@ -38,7 +38,7 @@ const bridgeTransaction = TransactionFixtureBuilder
 	.createDefault(CHAIN_NAME, NETWORK_IDENTIFIER)
 	.override({
 		message: { text: targetAccount.address },
-		mosaics: [transferToken],
+		tokens: [transferToken],
 		fee: {
 			token: transactionFeeToken
 		}
@@ -55,21 +55,16 @@ const targetWalletController = createWalletControllerMock({
 	currentAccount: targetAccount
 });
 
-const stepPair = {
+const step = {
 	createTransaction: jest.fn().mockResolvedValue(transactionBundle),
 	sourceWalletController,
 	targetWalletController
 };
 
-const bridge = {
-	getPairForStep: jest.fn().mockReturnValue(stepPair)
-};
-
 // Hook Helpers
 
 const createHookParams = overrides => ({
-	bridge,
-	walletController: sourceWalletController,
+	steps: [step],
 	amount: AMOUNT,
 	...overrides
 });
@@ -102,7 +97,7 @@ describe('hooks/useBridgeTransaction', () => {
 			});
 
 			// Assert:
-			expect(stepPair.createTransaction).toHaveBeenCalledWith({
+			expect(step.createTransaction).toHaveBeenCalledWith({
 				recipientAddress: targetAccount.address,
 				amount: AMOUNT,
 				amountOutMinimum: undefined
@@ -112,16 +107,24 @@ describe('hooks/useBridgeTransaction', () => {
 				id: 'section_0_0',
 				title: '',
 				chainName: sourceWalletController.chainName,
-				networkIdentifier: sourceWalletController.networkIdentifier,
-				addressBook: sourceWalletController.modules.addressBook,
-				walletAccounts: sourceWalletController.accounts,
 				tableData: [
 					{ type: 'account', value: bridgeTransaction.signerAddress, title: 'signerAddress' },
 					{ type: 'account', value: bridgeTransaction.message.text, title: 'recipientAddress' },
-					{ type: 'token', value: bridgeTransaction.mosaics, title: 'tokens' },
+					{ type: 'token', value: bridgeTransaction.tokens, title: 'tokens' },
 					{ type: 'fee', value: bridgeTransaction.fee, title: 'fee' }
 				]
 			}]);
+		});
+	});
+
+	describe('step lookup', () => {
+		it('rejects when the step index is outside the route', async () => {
+			// Arrange:
+			const params = createHookParams({ steps: [] });
+			const hookTester = new HookTester(useBridgeTransaction, [params]);
+
+			// Act & Assert:
+			await expect(hookTester.currentResult.createTransaction()).rejects.toThrow('No step found for index 0');
 		});
 	});
 });

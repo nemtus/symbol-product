@@ -43,8 +43,7 @@ import Animated, { FadeInDown } from 'react-native-reanimated';
  */
 export const Harvesting = () => {
 	const walletController = useWalletController();
-	const { ticker, isWalletReady, networkIdentifier, chainName, networkProperties } = walletController;
-	const walletAccounts = walletController.accounts[networkIdentifier];
+	const { ticker, isWalletReady, chainName, networkProperties } = walletController;
 
 	// Custom status to feedback pending state after sending start/stop transaction until next status load
 	const [isPendingTransaction, setIsPendingTransaction] = useState(false);
@@ -214,24 +213,20 @@ export const Harvesting = () => {
 						{/* Title and description */}
 						<Stack gap="none">
 							<StyledText type="title">
-								{$t('s_harvesting_title')}
+								{$t('screen_harvesting_title_intro')}
 							</StyledText>
 							<StyledText type="body">
-								{$t('s_harvesting_description')}
+								{$t('screen_harvesting_description_intro')}
 							</StyledText>
 						</Stack>
 
 						{/* Sender section */}
 						<Stack gap="none">
-							<StyledText type="title">{$t('s_harvesting_account_title')}</StyledText>
+							<StyledText type="title">{$t('screen_harvesting_title_account')}</StyledText>
 							<SelectTransactionSender
 								value={senderAddress}
 								options={senderOptions}
-								ticker={ticker}
 								chainName={chainName}
-								networkIdentifier={networkIdentifier}
-								walletAccounts={walletAccounts}
-								addressBook={walletController.modules.addressBook}
 								onChange={setSenderAddress}
 							/>
 						</Stack>
@@ -239,7 +234,7 @@ export const Harvesting = () => {
 						{/* Status section */}
 						<Stack gap="none">
 							<StyledText type="title">
-								{$t('s_harvesting_status_title')}
+								{$t('screen_harvesting_title_status')}
 							</StyledText>
 							<HarvestingStatus
 								statusViewModel={statusViewModel}
@@ -250,7 +245,7 @@ export const Harvesting = () => {
 						{/* Summary section */}
 						<Stack gap="none">
 							<StyledText type="title">
-								{$t('s_harvesting_harvested_title')}
+								{$t('screen_harvesting_title_harvested')}
 							</StyledText>
 							<HarvestingSummary
 								summaryViewModel={summaryViewModel}
@@ -264,7 +259,7 @@ export const Harvesting = () => {
 								<Stack>
 									<Stack gap="none">
 										<StyledText type="title">
-											{$t('s_harvesting_manage_title')}
+											{$t('screen_harvesting_title_manage')}
 										</StyledText>
 										<HarvestingForm
 											nodeUrl={nodeUrl}

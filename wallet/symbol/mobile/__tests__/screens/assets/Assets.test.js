@@ -39,13 +39,13 @@ const CHAIN_HEIGHT = 150_000;
 // Screen Text
 
 const SCREEN_TEXT = {
-	textFilterExpired: 's_assets_filter_expired',
-	textFilterCreated: 's_assets_filter_created',
+	textFilterExpired: 'screen_assets_chip_expired',
+	textFilterCreated: 'screen_assets_chip_created',
 	buttonClear: 'button_clear',
 	textEmptyList: 'message_emptyList',
-	textSectionCurrentAccount: 's_assets_section_currentAccount',
-	textSectionBridgeAccounts: 's_assets_section_bridgeAccounts',
-	textSectionMultisigAccounts: 's_assets_section_multisigAccounts'
+	textSectionCurrentAccount: 'screen_assets_title_currentAccount',
+	textSectionBridgeAccounts: 'screen_assets_title_bridgeAccounts',
+	textSectionMultisigAccounts: 'screen_assets_title_multisigAccounts'
 };
 
 // Account Fixtures
@@ -143,7 +143,7 @@ const tokenSymbolMultisigActive = TokenFixtureBuilder
 
 const accountInfoSymbolWithTokens = AccountInfoFixtureBuilder
 	.createWithAccount(CHAIN_NAME_SYMBOL, NETWORK_IDENTIFIER, 0)
-	.setMosaics([tokenSymbolCreatedActive, tokenSymbolExternalActive, tokenSymbolCreatedExpired])
+	.setTokens([tokenSymbolCreatedActive, tokenSymbolExternalActive, tokenSymbolCreatedExpired])
 	.build();
 
 const accountInfoEthereumWithTokens = AccountInfoFixtureBuilder
@@ -153,7 +153,7 @@ const accountInfoEthereumWithTokens = AccountInfoFixtureBuilder
 
 const accountInfoEmpty = AccountInfoFixtureBuilder
 	.createWithAccount(CHAIN_NAME_SYMBOL, NETWORK_IDENTIFIER, 0)
-	.setMosaics([])
+	.setTokens([])
 	.build();
 
 // Event Handlers Store
@@ -250,7 +250,7 @@ const CONTROLLER_CONFIG_SYMBOL_WITH_MULTISIG = {
 	networkProperties: networkPropertiesSymbol,
 	isWalletReady: true,
 	multisigAccounts: [
-		{ ...symbolMultisigAccount, mosaics: [tokenSymbolMultisigActive] }
+		{ ...symbolMultisigAccount, tokens: [tokenSymbolMultisigActive] }
 	]
 };
 

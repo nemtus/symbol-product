@@ -327,7 +327,7 @@ export class HarvestingModule {
 		// Request node for harvesting.
 		transactions.push({
 			type: TransactionType.TRANSFER,
-			mosaics: [],
+			tokens: [],
 			message: {
 				type: MessageType.DelegatedHarvesting,
 				payload: encodeDelegatedHarvestingMessage(
@@ -387,8 +387,8 @@ export class HarvestingModule {
 		// If nothing to unlink, then just escape
 		if (transactions.length === 0) {
 			throw new ControllerError(
-				'error_harvesting_no_keys_to_unlink',
-				'Failed to create stop harvesting transaction. No keys to unlink.'
+				'Failed to create stop harvesting transaction. No keys to unlink.',
+				'error_harvesting_no_keys_to_unlink'
 			);
 		}
 
@@ -418,8 +418,8 @@ export class HarvestingModule {
 
 		if (!accountInfo.publicKey) {
 			throw new ControllerError(
-				'error_harvesting_account_no_activity',
-				`Failed to create harvesting transaction. Public key for account "${address}" does not exist on the network.`
+				`Failed to create harvesting transaction. Public key for account "${address}" does not exist on the network.`,
+				'error_harvesting_account_no_activity'
 			);
 		}
 

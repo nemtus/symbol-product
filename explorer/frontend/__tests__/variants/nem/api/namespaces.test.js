@@ -1,0 +1,39 @@
+import { runApiTest } from '../../../test-utils/api';
+import { namespaceInfoResponse, namespaceInfoResult, namespacePageResponse, namespacePageResult } from '../../../test-utils/namespaces';
+import { fetchNamespaceInfo, fetchNamespacePage } from '@/app/variants/nem/api/namespaces';
+
+jest.mock('@/app/utils/server', () => {
+	return {
+		__esModule: true,
+		...jest.requireActual('@/app/utils/server')
+	};
+});
+
+describe('variants/nem/api/namespaces', () => {
+	describe('fetchNamespacePage', () => {
+		it('fetch namespace page', async () => {
+			// Arrange:
+			const searchCriteria = {
+				pageNumber: 3,
+				pageSize: 123
+			};
+			const expectedURL = 'https://explorer.backend/namespaces?limit=123&offset=246';
+			const expectedResult = namespacePageResult;
+
+			// Act + Assert:
+			await runApiTest(fetchNamespacePage, searchCriteria, namespacePageResponse, expectedURL, expectedResult);
+		});
+	});
+
+	describe('fetchNamespaceInfo', () => {
+		it('fetch namespace info by id (name)', async () => {
+			// Arrange:
+			const params = 'arustest.shone';
+			const expectedURL = 'https://explorer.backend/namespace/arustest.shone';
+			const expectedResult = namespaceInfoResult;
+
+			// Act + Assert:
+			await runApiTest(fetchNamespaceInfo, params, namespaceInfoResponse, expectedURL, expectedResult);
+		});
+	});
+});
