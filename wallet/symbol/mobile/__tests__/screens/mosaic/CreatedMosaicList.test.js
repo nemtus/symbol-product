@@ -22,12 +22,12 @@ const PAGE_SIZE = 15;
 // Screen Text
 
 const SCREEN_TEXT = {
-	textTitle: 's_createdMosaicList_title',
-	textDescription: 's_createdMosaicList_description',
-	textFilterRevokable: 's_createdMosaicList_filter_revokable',
-	textFilterSupplyMutable: 's_createdMosaicList_filter_supplyMutable',
-	textFilterExpired: 's_createdMosaicList_filter_expired',
-	textExpired: 's_assets_item_expired',
+	textTitle: 'screen_mosaic_createdList_title_intro',
+	textDescription: 'screen_mosaic_createdList_description_intro',
+	textFilterRevokable: 'screen_mosaic_chip_revokable',
+	textFilterSupplyMutable: 'screen_mosaic_chip_supplyMutable',
+	textFilterExpired: 'screen_mosaic_chip_expired',
+	textExpired: 'component_expirationProgress_label_expired',
 	buttonClear: 'button_clear',
 	textEmptyList: 'message_emptyList',
 	buttonCreateMosaic: 'plus'
@@ -49,6 +49,7 @@ const networkProperties = NetworkPropertiesFixtureBuilder
 // Token Fixtures
 
 const tokenDefinitionDefaults = {
+	name: null,
 	names: [],
 	duration: 0,
 	startHeight: 100,
@@ -74,7 +75,7 @@ const revokableTokenDefinition = TokenFixtureBuilder
 
 const supplyMutableTokenDefinition = TokenFixtureBuilder
 	.createWithToken(CHAIN_NAME, NETWORK_IDENTIFIER, 2)
-	.override({ ...tokenDefinitionDefaults, names: ['supply.mutable.token'], isSupplyMutable: true })
+	.override({ ...tokenDefinitionDefaults, name: 'supply.mutable.token', names: ['supply.mutable.token'], isSupplyMutable: true })
 	.build();
 
 const expiredTokenDefinition = TokenFixtureBuilder
@@ -93,9 +94,9 @@ const heldRevokableToken = TokenFixtureBuilder
 
 const createdTokenDefinitions = [revokableTokenDefinition, supplyMutableTokenDefinition, expiredTokenDefinition];
 
-// Expected display names (held entry provides the name, otherwise names[0] or the id)
+// Expected display names (the definition name, or the id when the definition is unnamed)
 
-const expectedRevokableTokenName = heldRevokableToken.name;
+const expectedRevokableTokenName = revokableTokenDefinition.id;
 const expectedSupplyMutableTokenName = 'supply.mutable.token';
 const expectedExpiredTokenName = expiredTokenDefinition.id;
 
@@ -107,7 +108,6 @@ const createTokenDefinitionPage = (startIndex, count, overrides = {}) =>
 			...tokenDefinitionDefaults,
 			id: `PAGE_TOKEN_ID_${startIndex + index}`,
 			divisibility: 0,
-			names: [`page.token.${startIndex + index}`],
 			...overrides
 		})
 		.build());
@@ -128,13 +128,13 @@ const secondPageTokenDefinition = TokenFixtureBuilder
 		...tokenDefinitionDefaults,
 		id: 'SECOND_PAGE_TOKEN_ID',
 		divisibility: 0,
-		names: ['second.page.token'],
 		isRevokable: true
 	})
 	.build();
 
-const expectedFirstPageTokenName = 'page.token.0';
-const expectedSecondPageTokenName = 'second.page.token';
+// Nameless page definitions display their ids
+const expectedFirstPageTokenName = 'PAGE_TOKEN_ID_0';
+const expectedSecondPageTokenName = 'SECOND_PAGE_TOKEN_ID';
 
 // Predefined page scenarios, keyed by the fetched page number
 
@@ -185,7 +185,7 @@ const setupMocks = (config = {}) => {
 		networkProperties,
 		currentAccount,
 		currentAccountInfo: {
-			mosaics: [heldRevokableToken]
+			tokens: [heldRevokableToken]
 		},
 		isWalletReady: true,
 		modules: {

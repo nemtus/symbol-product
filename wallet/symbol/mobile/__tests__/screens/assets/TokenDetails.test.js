@@ -28,17 +28,10 @@ const TOKEN_END_HEIGHT = 180_000;
 
 // Mocks
 
-jest.mock('@/app/utils', () => ({
-	...jest.requireActual('@/app/utils'),
-	getTokenKnownInfo: () => ({
-		name: TOKEN_NAME,
-		ticker: TOKEN_TICKER,
-		imageId: 'image'
-	}),
-	createTokenDisplayData: () => ({
-		name: `${TOKEN_NAME} • ${TOKEN_TICKER}`,
-		ticker: TOKEN_TICKER,
-		imageId: 'image'
+jest.mock('@/app/config', () => ({
+	...jest.requireActual('@/app/config'),
+	...require('__tests__/mock-factories').createKnownTokensConfigMock({
+		'E74B99BA41F4AFB4': { name: 'Test Token', ticker: 'XYM', imageId: 'image' }
 	})
 }));
 
@@ -57,16 +50,16 @@ const SCREEN_TEXT = {
 	textFieldTitleExpirationHeight: 'fieldTitle_expirationHeight',
 
 	// Alert texts
-	textAlertExpired: 's_assetDetails_alert_expired_description',
-	textAlertExpirable: 's_assetDetails_alert_expirable_description',
+	textAlertExpired: 'screen_assets_alert_expired_description',
+	textAlertExpirable: 'screen_assets_alert_expirable_description',
 
 	// Expiration progress texts
-	textExpired: 's_assets_item_expired',
-	textExpireIn: 's_assets_item_expireIn',
+	textExpired: 'component_expirationProgress_label_expired',
+	textExpireIn: 'component_expirationProgress_label_expireIn',
 
 	// Buttons
 	buttonSend: 'button_send',
-	buttonRevoke: 'button_revoke',
+	buttonRevoke: 'button_revokeMosaic',
 	buttonModify: 'button_modifyMosaic',
 
 	// Errors
@@ -171,6 +164,7 @@ const tokenHeldAfterRefresh = TokenFixtureBuilder
 
 const fetchedTokenInfo = {
 	id: TOKEN_ID,
+	name: TOKEN_NAME,
 	names: [TOKEN_NAME],
 	divisibility: TOKEN_DIVISIBILITY,
 	supply: TOKEN_SUPPLY,
@@ -182,12 +176,12 @@ const fetchedTokenInfo = {
 
 const createAccountInfoWithToken = token => AccountInfoFixtureBuilder
 	.createWithAccount(CHAIN_NAME, NETWORK_IDENTIFIER, 0)
-	.setMosaics([token])
+	.setTokens([token])
 	.build();
 
 const accountInfoWithoutToken = AccountInfoFixtureBuilder
 	.createWithAccount(CHAIN_NAME, NETWORK_IDENTIFIER, 0)
-	.setMosaics([])
+	.setTokens([])
 	.build();
 
 // Route Props Factory
@@ -271,7 +265,7 @@ describe('screens/assets/TokenDetails', () => {
 					: accountInfoWithoutToken;
 				const networkApi = {
 					account: { fetchAccountInfo: jest.fn().mockResolvedValue(accountInfo) },
-					mosaic: { fetchMosaicInfo: jest.fn().mockResolvedValue(config.fetchedTokenInfo) }
+					token: { fetchTokenInfo: jest.fn().mockResolvedValue(config.fetchedTokenInfo) }
 				};
 				mockWalletController(createWalletControllerConfig(accountInfo, networkPropertiesActive, networkApi));
 
@@ -284,9 +278,9 @@ describe('screens/assets/TokenDetails', () => {
 				expect(networkApi.account.fetchAccountInfo).toHaveBeenCalledWith(networkPropertiesActive, currentAccount.address);
 
 				if (expected.isTokenInfoFetched)
-					expect(networkApi.mosaic.fetchMosaicInfo).toHaveBeenCalledWith(networkPropertiesActive, TOKEN_ID);
+					expect(networkApi.token.fetchTokenInfo).toHaveBeenCalledWith(networkPropertiesActive, TOKEN_ID);
 				else
-					expect(networkApi.mosaic.fetchMosaicInfo).not.toHaveBeenCalled();
+					expect(networkApi.token.fetchTokenInfo).not.toHaveBeenCalled();
 
 				if (expected.textsRendered?.length)
 					screenTester.expectText(expected.textsRendered);

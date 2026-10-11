@@ -47,7 +47,7 @@ export class TransferModule {
 	 * and pass the selected tier as options.fee.
 	 * @param {object} options - Transfer options.
 	 * @param {string} options.recipientAddress - Recipient NEM address.
-	 * @param {object[]} options.mosaics - Mosaics to transfer.
+	 * @param {object[]} options.tokens - Tokens to transfer.
 	 * @param {string} [options.message] - Message text.
 	 * @param {boolean} [options.isEncrypted] - Whether to encrypt the message.
 	 * @param {string} [options.senderPublicKey] - Sender (multisig account) public key. When it differs from the
@@ -59,7 +59,7 @@ export class TransferModule {
 	createTransaction = async (options, password) => {
 		const {
 			recipientAddress,
-			mosaics,
+			tokens,
 			message,
 			isEncrypted,
 			fee
@@ -94,7 +94,7 @@ export class TransferModule {
 			type: TransactionType.TRANSFER,
 			signerPublicKey: senderPublicKey,
 			recipientAddress,
-			mosaics: mosaics || [],
+			tokens: tokens || [],
 			message: messagePayload,
 			fee: fee ?? createTransactionFee(networkProperties, '0'),
 			deadline: createDeadline(networkProperties.networkTime, SINGLE_TRANSACTION_DEADLINE_HOURS)
@@ -124,7 +124,7 @@ export class TransferModule {
 
 	/**
 	 * Calculates the transaction fee tiers for each transaction in the bundle.
-	 * Fees are derived from the transaction content (type, mosaics, message).
+	 * Fees are derived from the transaction content (type, tokens, message).
 	 * NEM fees are deterministic, so fast/medium/slow tiers are equal.
 	 * @param {TransactionBundle} transactionBundle - The transaction bundle.
 	 * @returns {Promise<TransactionFees[]>} The transaction fee tiers for each transaction in the bundle.
@@ -152,9 +152,9 @@ export class TransferModule {
 
 		if (transaction.type !== TransactionType.TRANSFER) {
 			throw new ControllerError(
-				'error_failed_decrypt_message_invalid_transaction_type',
 				`Failed to decrypt message. Transaction type "${transaction.type}" is not supported. `
-				+ `Expected type "${TransactionType.TRANSFER}"`
+				+ `Expected type "${TransactionType.TRANSFER}"`,
+				'error_failed_decrypt_message_invalid_transaction_type'
 			);
 		}
 
@@ -173,8 +173,8 @@ export class TransferModule {
 		}
 
 		throw new ControllerError(
-			'error_failed_decrypt_message_not_related',
-			'Failed to decrypt message. Transaction is not related to the current account'
+			'Failed to decrypt message. Transaction is not related to the current account',
+			'error_failed_decrypt_message_not_related'
 		);
 	};
 
@@ -183,8 +183,8 @@ export class TransferModule {
 		const accountInfo = await this.#api.account.fetchAccountInfo(networkProperties, recipientAddress);
 		if (!accountInfo.publicKey) {
 			throw new ControllerError(
-				'error_transfer_encrypted_message_no_recipient_public_key',
-				`Cannot encrypt message: recipient public key for "${recipientAddress}" is unknown`
+				`Cannot encrypt message: recipient public key for "${recipientAddress}" is unknown`,
+				'error_transfer_encrypted_message_no_recipient_public_key'
 			);
 		}
 		return accountInfo.publicKey;

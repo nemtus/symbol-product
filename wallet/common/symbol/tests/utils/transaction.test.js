@@ -6,6 +6,7 @@ import {
 	TransactionType
 } from '../../src/constants';
 import {
+	calculateEffectiveFee,
 	calculateTransactionFees,
 	calculateTransactionSize,
 	cosignTransaction,
@@ -571,13 +572,13 @@ describe('utils/transaction', () => {
 				type: TransactionType.TRANSFER,
 				signerPublicKey: signerAccount.publicKey,
 				recipientAddress: cosignerAccount.address,
-				mosaics: []
+				tokens: []
 			};
 			const hashLockTx = {
 				type: TransactionType.HASH_LOCK,
 				signerPublicKey: signerAccount.publicKey,
-				mosaic: {
-					id: networkProperties.networkCurrency.mosaicId,
+				token: {
+					id: networkProperties.networkCurrency.id,
 					amount: HASH_LOCK_AMOUNT,
 					divisibility: networkProperties.networkCurrency.divisibility
 				},
@@ -693,10 +694,43 @@ describe('utils/transaction', () => {
 		});
 	});
 
+	describe('calculateEffectiveFee', () => {
+		const runCalculateEffectiveFeeTest = (description, config, expected) => {
+			it(description, () => {
+				// Act:
+				const result = calculateEffectiveFee(config.size, config.feeMultiplier);
+
+				// Assert:
+				expect(result).toBe(expected.fee);
+			});
+		};
+
+		const calculateEffectiveFeeTests = [
+			{
+				description: 'returns the transaction size multiplied by the block fee multiplier',
+				config: { size: 176, feeMultiplier: 166 },
+				expected: { fee: '29216' }
+			},
+			{
+				description: 'returns zero when the block fee multiplier is zero',
+				config: { size: 176, feeMultiplier: 0 },
+				expected: { fee: '0' }
+			},
+			{
+				description: 'keeps precision when the charged fee exceeds the safe integer range',
+				config: { size: 4294967295, feeMultiplier: 4294967295 },
+				expected: { fee: '18446744065119617025' }
+			}
+		];
+
+		calculateEffectiveFeeTests.forEach(({ description, config, expected }) =>
+			runCalculateEffectiveFeeTest(description, config, expected));
+	});
+
 	describe('getUnresolvedIdsFromTransactions', () => {
 		const createBaseConfig = (overrides = {}) => ({
 			mapNamespaceId: id => `ns:${id}`,
-			mapMosaicId: id => `mosaic:${id}`,
+			mapTokenId: id => `mosaic:${id}`,
 			mapTransactionType: type => type,
 			getBodyFromTransaction: tx => tx.transaction,
 			getTransactionLocation: tx =>
@@ -720,7 +754,7 @@ describe('utils/transaction', () => {
 			expect(result).toStrictEqual(expected);
 		};
 
-		it('extracts mosaicIds and avoids duplications', () => {
+		it('extracts tokenIds and avoids duplications', () => {
 			// Arrange:
 			const transactions = [
 				{
@@ -756,7 +790,7 @@ describe('utils/transaction', () => {
 				}
 			});
 			const expected = {
-				mosaicIds: ['mosaic:AAA', 'mosaic:BBB', 'mosaic:CCC', 'mosaic:DDD'],
+				tokenIds: ['mosaic:AAA', 'mosaic:BBB', 'mosaic:CCC', 'mosaic:DDD'],
 				namespaceIds: [],
 				addresses: []
 			};
@@ -791,7 +825,7 @@ describe('utils/transaction', () => {
 				}
 			});
 			const expected = {
-				mosaicIds: [],
+				tokenIds: [],
 				namespaceIds: ['ns:ns1', 'ns:ns2', 'ns:ns3'],
 				addresses: []
 			};
@@ -828,7 +862,7 @@ describe('utils/transaction', () => {
 				}
 			});
 			const expected = {
-				mosaicIds: [],
+				tokenIds: [],
 				namespaceIds: [],
 				addresses: [
 					{ 
@@ -904,7 +938,7 @@ describe('utils/transaction', () => {
 				}
 			});
 			const expected = {
-				mosaicIds: [],
+				tokenIds: [],
 				namespaceIds: [],
 				addresses: [
 					{ 

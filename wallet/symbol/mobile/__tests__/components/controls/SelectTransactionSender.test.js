@@ -2,7 +2,7 @@ import { SelectTransactionSender } from '@/app/components/controls/SelectTransac
 import { AccountFixtureBuilder } from '__fixtures__/local/AccountFixtureBuilder';
 import { AccountInfoFixtureBuilder } from '__fixtures__/local/AccountInfoFixtureBuilder';
 import { ScreenTester } from '__tests__/ScreenTester';
-import { mockLocalization } from '__tests__/mock-helpers';
+import { createAddressBookMock, mockLocalization, mockWalletController } from '__tests__/mock-helpers';
 
 // Constants
 
@@ -13,11 +13,11 @@ const TICKER = 'XYM';
 // Screen Text
 
 const SCREEN_TEXT = {
-	label: 'input_sender',
-	tabCurrentAccount: 'c_selectTransactionSender_currentAccount',
-	tabMultisigAccount: 'c_selectTransactionSender_multisigAccount',
-	dropdownTitle: 'c_selectTransactionSender_selectTitle',
-	defaultMultisigName: 's_multisig_defaultAccountName'
+	label: 'Sender', // passed in as a prop, the caller translates it
+	tabCurrentAccount: 'component_selectTransactionSender_tab_currentAccount',
+	tabMultisigAccount: 'component_selectTransactionSender_tab_multisigAccount',
+	dropdownTitle: 'component_selectTransactionSender_title_selectSender',
+	defaultMultisigName: 'component_selectTransactionSender_title_defaultAccountName'
 };
 
 // Account Fixtures
@@ -43,25 +43,13 @@ const senderCurrentAccount = {
 	balance: '1000000000'
 };
 
-// Mock Modules
-
-const createMockAddressBook = (overrides = {}) => ({
-	getAddressName: jest.fn(),
-	getContactByAddress: jest.fn(),
-	...overrides
-});
-
 // Props
 
 const createProps = ({ multisigAccounts = [], ...overrides } = {}) => ({
 	label: SCREEN_TEXT.label,
 	value: currentAccount.address,
 	options: { current: senderCurrentAccount, multisigAccounts },
-	ticker: TICKER,
 	chainName: CHAIN_NAME,
-	networkIdentifier: NETWORK_IDENTIFIER,
-	walletAccounts: [currentAccount],
-	addressBook: createMockAddressBook(),
 	onChange: jest.fn(),
 	...overrides
 });
@@ -71,6 +59,13 @@ describe('components/controls/SelectTransactionSender', () => {
 		jest.useFakeTimers();
 		jest.clearAllMocks();
 		mockLocalization();
+		mockWalletController({
+			chainName: CHAIN_NAME,
+			networkIdentifier: NETWORK_IDENTIFIER,
+			ticker: TICKER,
+			accounts: { [NETWORK_IDENTIFIER]: [currentAccount] },
+			modules: { addressBook: createAddressBookMock() }
+		});
 	});
 
 	afterEach(() => {
@@ -106,6 +101,21 @@ describe('components/controls/SelectTransactionSender', () => {
 				SCREEN_TEXT.tabMultisigAccount,
 				currentAccount.address
 			]);
+		});
+
+		it('renders the default name when the selected multisig account is unnamed', async () => {
+			// Arrange:
+			const props = createProps({
+				multisigAccounts: MULTISIG_ACCOUNTS,
+				value: firstMultisigAccount.address
+			});
+
+			// Act:
+			const screenTester = new ScreenTester(SelectTransactionSender, props);
+			await screenTester.waitForTimer(); // initial render
+
+			// Assert:
+			screenTester.expectText([SCREEN_TEXT.defaultMultisigName, firstMultisigAccount.address]);
 		});
 
 		it('renders only the current account when multisig is disabled', async () => {

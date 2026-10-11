@@ -24,6 +24,10 @@ export const TRANSACTION_DIRECTION = {
 	OUTGOING: 'outgoing'
 };
 
+export const REWARD_TYPE = {
+	HARVESTING: 'harvesting'
+};
+
 export const BLOCK_STATUS = {
 	PENDING: 'pending',
 	CREATED: 'created',
@@ -81,3 +85,12 @@ export const TRANSACTION_CHART_TYPE = {
 export const BACKEND_HEALTH_ERROR = {
 	SYNCHRONIZATION: 'synchronization'
 };
+
+export const BACKEND_HEALTH_STATUS = {
+	INITIAL: 'initial',
+	AVAILABLE: 'available',
+	UNAVAILABLE: 'unavailable',
+	ERROR: 'error'
+};
+
+export const DATA_REFRESH_INTERVAL = 60000;

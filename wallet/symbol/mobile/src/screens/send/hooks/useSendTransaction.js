@@ -47,7 +47,6 @@ export const useSendTransaction = ({
 			senderPublicKey,
 			recipientAddress,
 			tokens,
-			mosaics: tokens,
 			messageText,
 			isMessageEncrypted
 		});
@@ -61,13 +60,12 @@ export const useSendTransaction = ({
 	 * @returns {TransactionConfirmationDialogSection[]}
 	 */
 	const getConfirmationPreview = transactionBundle => {
-		const { chainName, networkIdentifier, modules: { addressBook }, accounts } = walletController;
-		const walletAccounts = accounts;
+		const { chainName } = walletController;
 
 		const createHashLockTableData = transaction => {
 			const hashLockData = {
 				type: transaction.type,
-				description: $t('form_transfer_hash_lock_description', {
+				description: $t('screen_send_description_hashLock', {
 					lockedAmount: transaction.lockedAmount,
 					duration: transaction.duration
 				}),
@@ -91,7 +89,7 @@ export const useSendTransaction = ({
 				data.isMessageEncrypted = transfer.message.type === MessageType.ENCRYPTED_TEXT;
 			}
 
-			data.mosaics = transfer.mosaics ?? transfer.tokens;
+			data.tokens = transfer.tokens;
 			data.fee = transaction.fee;
 			
 			return objectToTableData(data);
@@ -109,9 +107,6 @@ export const useSendTransaction = ({
 				id: `section_${index}`,
 				title: '',
 				chainName,
-				networkIdentifier,
-				addressBook,
-				walletAccounts,
 				tableData
 			};
 		});

@@ -51,14 +51,13 @@ export const useModifyMosaicTransaction = ({
 	 * @returns {TransactionConfirmationDialogSection[]}
 	 */
 	const getConfirmationPreview = transactionBundle => {
-		const { chainName, networkIdentifier, modules: { addressBook }, accounts } = walletController;
-		const walletAccounts = accounts;
+		const { chainName } = walletController;
 
 		const createSupplyChangeTableData = transaction => {
 			const previewData = {
 				type: transaction.type,
 				signerAddress: transaction.signerAddress,
-				mosaicId: transaction.mosaicId,
+				tokenId: transaction.tokenId,
 				action: transaction.action,
 				// The bundle carries the delta in absolute units, the dialog shows the amount the user entered
 				delta: absoluteToRelativeAmount(transaction.delta, divisibility),
@@ -75,9 +74,6 @@ export const useModifyMosaicTransaction = ({
 				id: `section_${index}`,
 				title: '',
 				chainName,
-				networkIdentifier,
-				addressBook,
-				walletAccounts,
 				tableData
 			};
 		});
