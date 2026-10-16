@@ -2,6 +2,8 @@ from common.symbol.NativeMosaic import NativeMosaicInfo
 from psycopg2 import Error as PsycopgError
 from zenlog import log
 
+from rest.model.symbol.Account import SymbolAccountView
+from rest.model.symbol.format import format_timestamp
 from rest.model.symbol.Receipt import SymbolReceiptView
 from rest.model.symbol.Transaction import SymbolTransactionView
 
@@ -11,7 +13,7 @@ DATABASE_UNAVAILABLE_MESSAGE = 'Symbol database is unavailable'
 class SymbolRestFacade:
 	"""Symbol Rest Facade."""
 
-	def __init__(self, symbol_db, node_config, native_mosaic_info):
+	def __init__(self, symbol_db, node_config, native_mosaic_info, network):
 		"""Creates a Symbol facade with its required database and node dependencies."""
 
 		if symbol_db is None:
@@ -22,9 +24,13 @@ class SymbolRestFacade:
 		if not isinstance(native_mosaic_info, NativeMosaicInfo):
 			raise ValueError('Native mosaic information is required')
 
+		if network is None:
+			raise ValueError('Symbol network is required')
+
 		self.symbol_db = symbol_db
 		self.node_config = node_config
 		self.native_mosaic_info = native_mosaic_info
+		self.network = network
 
 	def get_health(self):
 		"""Gets health of the Symbol backend core foundation."""
@@ -61,7 +67,7 @@ class SymbolRestFacade:
 				chain_height = sync_state.get('chain_height')
 				finalized_height = sync_state['finalized_height']
 				last_db_height = sync_state['last_synced_height']
-				last_db_synced_at = sync_state['updated_at'].isoformat() if sync_state['updated_at'] else None
+				last_db_synced_at = format_timestamp(sync_state['updated_at'])
 				status = sync_state['status']
 				backend_synced = 'healthy' == status and last_db_height == chain_height
 				if 'healthy' == status and not backend_synced:
@@ -97,6 +103,12 @@ class SymbolRestFacade:
 		blocks = self.symbol_db.get_blocks(from_height, limit, sort)
 		return [block.to_dict(self.native_mosaic_info) for block in blocks]
 
+	def get_mosaics(self, limit, offset, sort):
+		"""Gets a current mosaic page."""
+
+		mosaics = self.symbol_db.get_mosaics(limit, offset, sort)
+		return [mosaic.to_dict() for mosaic in mosaics]
+
 	def get_block(self, height):
 		"""Gets a Symbol block by height."""
 
@@ -118,3 +130,9 @@ class SymbolRestFacade:
 
 		transactions = self.symbol_db.get_transactions(query)
 		return [SymbolTransactionView(transaction).to_dict(self.native_mosaic_info) for transaction in transactions]
+
+	def try_get_account(self, address=None, public_key=None):
+		"""Gets a Symbol account detail DTO by address or public key."""
+
+		account = self.symbol_db.try_get_account(address, public_key)
+		return SymbolAccountView(account, self.network, self.native_mosaic_info).to_dict() if account else None

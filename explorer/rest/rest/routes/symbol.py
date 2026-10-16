@@ -23,8 +23,11 @@ from rest.db.SymbolDatabase import (
 )
 from rest.facade.SymbolRestFacade import SymbolRestFacade
 from rest.model.common import DatabaseConfig
+from rest.model.symbol.validation import SymbolDataInvalid
 
 BLOCK_LIST_QUERY_PARAMETERS = frozenset(['limit', 'fromHeight', 'sort'])
+MOSAIC_QUERY_PARAMETERS = frozenset(['limit', 'offset', 'sort'])
+MOSAIC_MAX_OFFSET = 100000
 RECEIPT_QUERY_PARAMETERS = frozenset([
 	'limit', 'offset', 'group', 'receiptType', 'includedReceiptTypes', 'targetAddress', 'senderAddress'
 ])
@@ -43,6 +46,7 @@ XYM_DIVISIBILITY = 6
 
 
 def setup_symbol_facade(app):
+	network = _create_symbol_network(app.config)
 	native_mosaic_info = _create_native_mosaic_info(app.config)
 	config = configparser.ConfigParser()
 	db_path = Path(app.config.get('DATABASE_CONFIG_FILEPATH'))
@@ -64,7 +68,18 @@ def setup_symbol_facade(app):
 
 	symbol_db = SymbolDatabase(db_params, native_mosaic_info)
 	app.extensions['symbol_database'] = symbol_db
-	return SymbolRestFacade(symbol_db, node_config, native_mosaic_info)
+	return SymbolRestFacade(symbol_db, node_config, native_mosaic_info, network)
+
+
+def _create_symbol_network(app_config):
+	if 'NETWORK_NAME' not in app_config:
+		raise ValueError('NETWORK_NAME is required')
+
+	network_name = app_config['NETWORK_NAME']
+	if network_name not in ('mainnet', 'testnet'):
+		raise ValueError('NETWORK_NAME must be either mainnet or testnet')
+
+	return Network.MAINNET if network_name == 'mainnet' else Network.TESTNET
 
 
 def _create_native_mosaic_info(app_config):
@@ -82,6 +97,9 @@ def setup_symbol_routes(app, symbol_api_facade):
 			return None, query_fn()
 		except (PsycopgError, SymbolDataUnavailable):
 			log.error(error_log)
+			return _service_unavailable('Symbol backend data is unavailable'), None
+		except SymbolDataInvalid as error:
+			log.error(f'Invalid Symbol backend data at {error.field_path}: {error.reason}')
 			return _service_unavailable('Symbol backend data is unavailable'), None
 
 	@app.route('/api/symbol/health')
@@ -132,6 +150,8 @@ def setup_symbol_routes(app, symbol_api_facade):
 
 		return jsonify(result)
 
+	_setup_symbol_mosaic_routes(app, symbol_api_facade, _run_symbol_query)
+
 	@app.route('/api/symbol/receipts')
 	def api_get_symbol_receipts():
 		try:
@@ -149,7 +169,11 @@ def setup_symbol_routes(app, symbol_api_facade):
 		return jsonify(result)
 
 	_setup_symbol_transactions_route(app, symbol_api_facade, _run_symbol_query)
+	_setup_symbol_account_routes(app, symbol_api_facade, _run_symbol_query)
+	_setup_symbol_block_receipts_route(app, symbol_api_facade, _run_symbol_query)
 
+
+def _setup_symbol_block_receipts_route(app, symbol_api_facade, run_symbol_query):
 	@app.route('/api/symbol/block/<height>/receipts')
 	def api_get_symbol_block_receipts(height):
 		try:
@@ -159,7 +183,7 @@ def setup_symbol_routes(app, symbol_api_facade):
 		except ValueError as error:
 			abort(400, error)
 
-		error, result = _run_symbol_query(
+		error, result = run_symbol_query(
 			lambda: symbol_api_facade.get_receipts(query),
 			'Failed to get Symbol block receipts')
 		if error:
@@ -167,6 +191,48 @@ def setup_symbol_routes(app, symbol_api_facade):
 
 		if result is None:
 			abort(404)
+
+		return jsonify(result)
+
+
+def _setup_symbol_account_routes(app, symbol_api_facade, run_symbol_query):
+	@app.route('/api/symbol/account')
+	def api_get_symbol_account():
+		try:
+			address, public_key = _parse_account_query(symbol_api_facade.network)
+		except ValueError as error:
+			abort(400, error)
+
+		error, result = run_symbol_query(
+			lambda: symbol_api_facade.try_get_account(address, public_key),
+			'Failed to get Symbol account')
+		if error:
+			return error
+
+		if result is None:
+			abort(404)
+
+		return jsonify(result)
+
+
+def _setup_symbol_mosaic_routes(app, symbol_api_facade, run_symbol_query):
+	@app.route('/api/symbol/mosaics')
+	def api_get_symbol_mosaics():
+		try:
+			_validate_allowed_query_parameters(MOSAIC_QUERY_PARAMETERS)
+			limit = _parse_bounded_integer('limit', _get_scalar_parameter('limit', '10'), 1, 100)
+			offset = _parse_bounded_integer('offset', _get_scalar_parameter('offset', '0'), 0, MOSAIC_MAX_OFFSET)
+			sort = _get_scalar_parameter('sort', 'DESC').upper()
+			if sort not in ['ASC', 'DESC']:
+				raise ValueError('Sort must be either ASC or DESC')
+		except ValueError as error:
+			abort(400, error)
+
+		error, result = run_symbol_query(
+			lambda: symbol_api_facade.get_mosaics(limit, offset, SortOrder(sort)),
+			'Failed to get Symbol mosaics')
+		if error:
+			return error
 
 		return jsonify(result)
 
@@ -395,6 +461,38 @@ def _parse_address(name):
 		return Address(value).bytes
 	except (TypeError, ValueError) as error:
 		raise ValueError(f'Invalid {name}') from error
+
+
+def _parse_account_query(network):
+	_validate_query_parameters({'address', 'publicKey'})
+	address = _get_scalar_parameter('address')
+	public_key = _get_scalar_parameter('publicKey')
+	if (address is None) == (public_key is None):
+		raise ValueError('Exactly one of address or publicKey is required')
+
+	if address is not None:
+		return _parse_account_address(address, network), None
+
+	return None, _parse_account_search_public_key(public_key)
+
+
+def _validate_query_parameters(allowed_parameters):
+	if set(request.args.keys()) - allowed_parameters:
+		raise ValueError('Unsupported query parameter')
+
+
+def _parse_account_address(value, network):
+	if not network.is_valid_address_string(value):
+		raise ValueError('Invalid address')
+
+	return Address(value).bytes
+
+
+def _parse_account_search_public_key(value):
+	if not re.fullmatch(r'[0-9A-Fa-f]{64}', value, re.ASCII) or value == '0' * 64:
+		raise ValueError('Invalid publicKey')
+
+	return PublicKey(value).bytes
 
 
 def _service_unavailable(message):
