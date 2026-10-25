@@ -11,13 +11,36 @@ from common.tests.PostgresTestUtils import drop_symbol_block_tables_if_present
 from symbolchain.sc import ReceiptType, TransactionType
 from symbolchain.symbol.Network import Address, Network
 
-from puller.facade.SymbolPuller import MAX_PAGE_SIZE, DatabaseConfiguration, SymbolPuller
+from puller.facade.SymbolPuller import DEFAULT_MAX_TRANSACTIONS_PER_BATCH, MAX_PAGE_SIZE, DatabaseConfiguration, SymbolPuller
 from puller.model.symbol.Block import create_block_row
 from tests.test.SymbolTestConstants import BENEFICIARY_ADDRESS, RECIPIENT_ADDRESS, SIGNER_PUBLIC_KEY
 
 NODE_URL = 'http://127.0.0.1:3000'
 NATIVE_MOSAIC_ID = '72C0212E67A08BCE'
 NATIVE_MOSAIC_DIVISIBILITY = 6
+COMPLETE_BATCH_STATE_DURABLE_TABLES = (
+	'symbol_blocks',
+	'symbol_transactions',
+	'symbol_transaction_mosaics',
+	'symbol_transaction_addresses',
+	'symbol_receipts')
+COMPLETE_BATCH_STATE_CURRENT_TABLES = (
+	'symbol_accounts',
+	'symbol_account_mosaics')
+COMPLETE_BATCH_STATE_SUPPLEMENTAL_TABLES = (
+	'symbol_multisig',
+	'symbol_namespaces',
+	'symbol_alias_names',
+	'symbol_mosaics',
+	'symbol_metadata',
+	'symbol_hash_locks',
+	'symbol_secret_locks',
+	'symbol_mosaic_restrictions')
+COMPLETE_BATCH_STATE_TABLE_GROUPS = (
+	COMPLETE_BATCH_STATE_DURABLE_TABLES,
+	COMPLETE_BATCH_STATE_CURRENT_TABLES,
+	COMPLETE_BATCH_STATE_SUPPLEMENTAL_TABLES,
+	('symbol_sync_state',))
 
 
 class RecordingCleanupLogger:
@@ -79,7 +102,8 @@ def create_symbol_puller(  # pylint: disable=too-many-arguments,too-many-positio
 	connector=None,
 	rate_limiter=None,
 	time_source=None,
-	performance_logger=None
+	performance_logger=None,
+	max_transactions_per_batch=DEFAULT_MAX_TRANSACTIONS_PER_BATCH
 ):
 	node_config = SymbolNodeConfiguration.from_url(
 		node_url,
@@ -101,6 +125,7 @@ def create_symbol_puller(  # pylint: disable=too-many-arguments,too-many-positio
 		network_type,
 		node_config,
 		max_requests_per_second=1_000_000,
+		max_transactions_per_batch=max_transactions_per_batch,
 		rate_limiter=rate_limiter,
 		**puller_kwargs
 	)
@@ -116,7 +141,8 @@ def temporary_symbol_puller(  # pylint: disable=too-many-arguments,too-many-posi
 	connector=None,
 	rate_limiter=None,
 	time_source=None,
-	performance_logger=None
+	performance_logger=None,
+	max_transactions_per_batch=DEFAULT_MAX_TRANSACTIONS_PER_BATCH
 ):
 	with tempfile.TemporaryDirectory() as temp_directory:
 		db_config_path = create_db_config(temp_directory)
@@ -128,7 +154,8 @@ def temporary_symbol_puller(  # pylint: disable=too-many-arguments,too-many-posi
 			connector=connector,
 			rate_limiter=rate_limiter,
 			time_source=time_source,
-			performance_logger=performance_logger
+			performance_logger=performance_logger,
+			max_transactions_per_batch=max_transactions_per_batch
 		)
 
 
@@ -297,6 +324,56 @@ def create_transaction_page(items, page_number=1, page_size=MAX_PAGE_SIZE):
 		'data': items,
 		'pagination': {'pageNumber': page_number, 'pageSize': page_size}
 	}
+
+
+def create_adaptive_batch_fixture(
+	total_transaction_counts,
+	transaction_ranges,
+	top_level_counts=None,
+	transactions_by_height=None,
+	failing_transaction_range=None
+):
+	"""Creates deterministic block and response pages for adaptive batch tests."""
+	top_level_counts = top_level_counts or total_transaction_counts
+	transactions_by_height = transactions_by_height or {}
+	blocks = [
+		create_node_block(
+			height,
+			transactions_count=top_level_counts[height - 1],
+			total_transactions_count=total_transaction_counts[height - 1])
+		for height in range(1, len(total_transaction_counts) + 1)
+	]
+	transactions_by_height = {
+		height: list(transactions_by_height.get(height, []))
+		for height in range(1, len(blocks) + 1)
+	}
+	for height, transaction_count in enumerate(top_level_counts, 1):
+		if transactions_by_height[height]:
+			continue
+
+		transactions_by_height[height] = [
+			create_node_transaction(
+				height,
+				transaction_hash=f'{height:060X}{index:04X}',
+				transaction_id=f'transaction-{height}-{index}',
+				block_index=index)
+			for index in range(transaction_count)
+		]
+
+	transaction_pages = {}
+	statement_pages = {}
+	for start_height, end_height in transaction_ranges:
+		transaction_pages[transaction_path(start_height, end_height)] = create_transaction_page([
+			transaction
+			for height in range(start_height, end_height + 1)
+			for transaction in transactions_by_height[height]
+		])
+		statement_pages[statement_path(start_height, end_height)] = {'data': []}
+
+	if failing_transaction_range is not None:
+		transaction_pages[transaction_path(*failing_transaction_range)] = RuntimeError('adaptive transaction fetch failed')
+
+	return blocks, transaction_pages, statement_pages
 
 
 def statement_path(start_height, end_height, page_number=1):
@@ -714,23 +791,8 @@ class SymbolPullerTestBase(TestCase):
 		return state
 
 	def _fetch_complete_batch_state(self):
-		return self._fetch_table_state((
-			'symbol_blocks',
-			'symbol_transactions',
-			'symbol_transaction_mosaics',
-			'symbol_transaction_addresses',
-			'symbol_receipts',
-			'symbol_accounts',
-			'symbol_account_mosaics',
-			'symbol_multisig',
-			'symbol_namespaces',
-			'symbol_alias_names',
-			'symbol_mosaics',
-			'symbol_metadata',
-			'symbol_hash_locks',
-			'symbol_secret_locks',
-			'symbol_mosaic_restrictions',
-			'symbol_sync_state'))
+		table_names = tuple(table_name for group in COMPLETE_BATCH_STATE_TABLE_GROUPS for table_name in group)
+		return self._fetch_table_state(table_names)
 
 	@staticmethod
 	def _fetch_block_hash(database, height):

@@ -6,7 +6,7 @@ from common.symbol.NativeMosaic import NativeMosaicInfo
 from common.symbol.NodeConfiguration import SymbolNodeConfiguration
 from flask import Flask
 from symbolchain.sc import TransactionType
-from symbolchain.symbol.Network import Address
+from symbolchain.symbol.Network import Address, Network
 
 from rest import setup_error_handlers
 from rest.db.SymbolDatabase import SymbolDatabase
@@ -85,7 +85,7 @@ def test_parent_child_full_json(query):
 				'value': [{'id': '1234567890ABCDEF', 'name': '1234567890ABCDEF', 'amount': 123.45}],
 				'amount': 0,
 				'fee': None,
-				'timestamp': '2026-01-01T00:00:01Z',
+				'timestamp': '2026-01-01 00:00:01',
 				'message': {'type': 'plain', 'text': 'Hello'}
 			},
 			{
@@ -102,7 +102,7 @@ def test_parent_child_full_json(query):
 				'value': [],
 				'amount': 0,
 				'fee': 0.000001,
-				'timestamp': '2026-01-01T00:00:01Z',
+				'timestamp': '2026-01-01 00:00:01',
 				'message': None
 			}
 		]
@@ -162,7 +162,7 @@ def test_embedded_has_own_signer_address():
 			'value': [],
 			'amount': 0,
 			'fee': None,
-			'timestamp': '2026-01-01T00:00:01Z',
+			'timestamp': '2026-01-01 00:00:01',
 			'message': None
 		},
 		{
@@ -179,7 +179,7 @@ def test_embedded_has_own_signer_address():
 			'value': [],
 			'amount': 0,
 			'fee': 0.000001,
-			'timestamp': '2026-01-01T00:00:01Z',
+			'timestamp': '2026-01-01 00:00:01',
 			'message': None
 		}
 	] == response.json
@@ -335,7 +335,7 @@ def test_type_or_requires_sender_match():
 		'value': [],
 		'amount': 0,
 		'fee': 0.000001,
-		'timestamp': '2026-01-01T00:00:01Z',
+		'timestamp': '2026-01-01 00:00:01',
 		'message': None
 	}
 	expected = [
@@ -564,7 +564,7 @@ def test_native_only_no_mosaic_table_200(state_name):
 		'value': [{'id': NATIVE_MOSAIC_INFO.id, 'name': NATIVE_MOSAIC_INFO.id, 'amount': 12.345678}],
 		'amount': 12.345678,
 		'fee': 0.000002,
-		'timestamp': '2026-01-01T00:00:02Z',
+		'timestamp': '2026-01-01 00:00:02',
 		'message': None
 	}] == response.json
 
@@ -663,7 +663,7 @@ def test_repairing_safe_list_200(query):
 		'value': [],
 		'amount': 0,
 		'fee': 0.000002,
-		'timestamp': '2026-01-01T00:00:02Z',
+		'timestamp': '2026-01-01 00:00:02',
 		'message': None
 	}] == response.json
 
@@ -684,7 +684,7 @@ def _expected_alias_transaction(hash_value, height, value_amount, **overrides):
 		'value': [{'id': ALIAS_TARGET_MOSAIC_ID, 'name': ALIAS_TARGET_MOSAIC_ID, 'amount': value_amount}],
 		'amount': 0,
 		'fee': height / 1000000,
-		'timestamp': f'2026-01-01T00:00:{height:02d}Z',
+		'timestamp': f'2026-01-01 00:00:{height:02d}',
 		'message': None,
 		**overrides
 	}
@@ -746,6 +746,9 @@ def _create_transaction_test_client(db_config):
 		facade = SymbolRestFacade(
 			database,
 			SymbolNodeConfiguration.from_url('http://127.0.0.1:3000', allow_loopback=True),
-			NATIVE_MOSAIC_INFO)
+			NATIVE_MOSAIC_INFO,
+			Network.TESTNET,
+			None,
+			7)
 		setup_symbol_routes(app, facade)
 		yield app.test_client()
