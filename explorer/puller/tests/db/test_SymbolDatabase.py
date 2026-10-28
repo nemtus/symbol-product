@@ -2121,6 +2121,23 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 
 		return database
 
+	@staticmethod
+	def _fetch_transaction_height_indexes(cursor):
+		cursor.execute(
+			'''
+			SELECT index_class.relname, index_class.oid
+			FROM pg_index AS index_data
+			JOIN pg_class AS index_class ON index_class.oid = index_data.indexrelid
+			JOIN pg_class AS table_class ON table_class.oid = index_data.indrelid
+			JOIN pg_namespace AS table_namespace ON table_namespace.oid = table_class.relnamespace
+			WHERE table_namespace.nspname = 'public'
+				AND index_class.relname IN (%s, %s)
+			ORDER BY index_class.relname
+			''',
+			('idx_symbol_transaction_mosaics_height', 'idx_symbol_transactions_height_all'))
+
+		return cursor.fetchall()
+
 	def test_create_tables_creates_symbol_tables(self):
 		# Arrange:
 		database = self._create_uninitialized_database()
@@ -3009,8 +3026,10 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 		self.assertEqual([
 			'idx_symbol_transaction_addresses_address_height',
 			'idx_symbol_transaction_addresses_height',
+			'idx_symbol_transaction_mosaics_height',
 			'idx_symbol_transaction_mosaics_mosaic_height',
 			'idx_symbol_transaction_mosaics_mosaic_role_height',
+			'idx_symbol_transactions_height_all',
 			'idx_symbol_transactions_height_desc',
 			'idx_symbol_transactions_list_sequence_desc',
 			'idx_symbol_transactions_recipient_height',
@@ -3019,6 +3038,104 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 			'idx_symbol_transactions_timestamp',
 			'idx_symbol_transactions_type_height'
 		], indexes)
+
+	def test_create_tables_creates_transaction_height_indexes_with_expected_definitions(self):
+		# Arrange:
+		database = self._create_uninitialized_database()
+		cursor = database.connection.cursor()
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		cursor.execute(
+			'''
+			SELECT
+				index_class.relname,
+				table_class.relname,
+				access_method.amname,
+				index_data.indisunique,
+				index_data.indnkeyatts,
+				index_data.indnatts,
+				index_data.indisvalid,
+				index_data.indisready,
+				index_data.indislive,
+				pg_get_indexdef(index_data.indexrelid, 1, true),
+				pg_get_expr(index_data.indexprs, index_data.indrelid),
+				pg_get_expr(index_data.indpred, index_data.indrelid)
+			FROM pg_index AS index_data
+			JOIN pg_class AS index_class ON index_class.oid = index_data.indexrelid
+			JOIN pg_class AS table_class ON table_class.oid = index_data.indrelid
+			JOIN pg_namespace AS table_namespace ON table_namespace.oid = table_class.relnamespace
+			JOIN pg_am AS access_method ON access_method.oid = index_class.relam
+			WHERE table_namespace.nspname = 'public'
+				AND index_class.relname IN (%s, %s)
+			ORDER BY index_class.relname
+			''',
+			('idx_symbol_transaction_mosaics_height', 'idx_symbol_transactions_height_all'))
+		self.assertEqual([
+			(
+				'idx_symbol_transaction_mosaics_height',
+				'symbol_transaction_mosaics',
+				'btree',
+				False,
+				1,
+				1,
+				True,
+				True,
+				True,
+				'height',
+				None,
+				None
+			),
+			(
+				'idx_symbol_transactions_height_all',
+				'symbol_transactions',
+				'btree',
+				False,
+				1,
+				1,
+				True,
+				True,
+				True,
+				'height',
+				None,
+				None
+			)
+		], cursor.fetchall())
+
+	def test_create_tables_adds_missing_height_indexes_to_existing_tables_idempotently(self):
+		# Arrange:
+		database = self._create_database()
+		cursor = database.connection.cursor()
+		cursor.execute('DROP INDEX idx_symbol_transaction_mosaics_height')
+		cursor.execute('DROP INDEX idx_symbol_transactions_height_all')
+		database.connection.commit()
+		cursor.execute(
+			'''
+			SELECT table_name
+			FROM information_schema.tables
+			WHERE table_schema = 'public'
+				AND table_name IN ('symbol_transaction_mosaics', 'symbol_transactions')
+			ORDER BY table_name
+			''')
+		self.assertEqual(['symbol_transaction_mosaics', 'symbol_transactions'], [row[0] for row in cursor.fetchall()])
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		created_indexes = self._fetch_transaction_height_indexes(cursor)
+		self.assertEqual([
+			'idx_symbol_transaction_mosaics_height',
+			'idx_symbol_transactions_height_all'
+		], [row[0] for row in created_indexes])
+
+		# Act:
+		database.create_tables()
+
+		# Assert:
+		self.assertEqual(created_indexes, self._fetch_transaction_height_indexes(cursor))
 
 	def test_create_tables_creates_symbol_transaction_partial_indexes_with_predicate(self):
 		# Arrange:
@@ -3314,6 +3431,77 @@ class SymbolDatabaseTest(TestCase):  # pylint: disable=too-many-public-methods
 			bytes(b'repaired'),
 			bytes(result['last_synced_block_hash'])
 		)
+
+	def test_checkpoint_sync_state_publishes_batch_and_clears_dirty_marker(self):
+		# Arrange:
+		database = self._create_database()
+		database.upsert_sync_state(_create_sync_state(
+			last_synced_height=1,
+			last_synced_block_hash=b'old-checkpoint',
+			dirty_state_from_height=2))
+
+		# Act:
+		database.checkpoint_sync_state(_create_sync_state(
+			chain_height=4,
+			last_synced_height=3,
+			last_synced_block_hash=b'new-checkpoint',
+			dirty_state_from_height=None))
+
+		# Assert:
+		result = database.get_sync_state()
+		self.assertEqual(4, result['chain_height'])
+		self.assertEqual(3, result['last_synced_height'])
+		self.assertEqual(bytes(b'new-checkpoint'), bytes(result['last_synced_block_hash']))
+		self.assertIsNone(result['dirty_state_from_height'])
+
+	def test_checkpoint_sync_state_rolls_back_watermark_and_marker_when_commit_fails(self):
+		# Arrange:
+		database = self._create_database()
+		database.upsert_sync_state(_create_sync_state(
+			last_synced_height=1,
+			last_synced_block_hash=b'old-checkpoint',
+			dirty_state_from_height=2))
+		previous_sync_state = database.get_sync_state()
+		original_connection = database.connection
+		database.connection = FailingCommitConnection(original_connection)
+
+		# Act:
+		try:
+			with self.assertRaisesRegex(RuntimeError, 'commit failed'):
+				database.checkpoint_sync_state(_create_sync_state(
+					last_synced_height=3,
+					last_synced_block_hash=b'new-checkpoint',
+					dirty_state_from_height=None))
+		finally:
+			database.connection = original_connection
+
+		# Assert:
+		# Without production rollback, this read sees the uncommitted replacement state and the snapshot assertion fails.
+		result = database.get_sync_state()
+		self.assertEqual(previous_sync_state, result)
+
+		# Act:
+		database.checkpoint_sync_state(_create_sync_state(
+			chain_height=4,
+			finalized_height=3,
+			finalized_hash=b'finalized-checkpoint',
+			last_synced_height=3,
+			last_synced_block_hash=b'new-checkpoint',
+			dirty_state_from_height=None))
+
+		# Assert:
+		result = database.get_sync_state()
+		result['finalized_hash'] = bytes(result['finalized_hash']) if result['finalized_hash'] is not None else None
+		result['last_synced_block_hash'] = (
+			bytes(result['last_synced_block_hash'])
+			if result['last_synced_block_hash'] is not None else None)
+		self.assertEqual(_create_sync_state(
+			chain_height=4,
+			finalized_height=3,
+			finalized_hash=b'finalized-checkpoint',
+			last_synced_height=3,
+			last_synced_block_hash=b'new-checkpoint',
+			dirty_state_from_height=None), result)
 
 	def test_rejects_invalid_sync_state_status(self):
 		# Arrange:

@@ -1,11 +1,23 @@
+from datetime import datetime, timedelta, timezone
 from unittest import TestCase
+from unittest.mock import create_autospec
 
 from common.symbol.NativeMosaic import NativeMosaicInfo
 from common.symbol.NodeConfiguration import SymbolNodeConfiguration
 from psycopg2 import Error as PsycopgError
 from psycopg2 import OperationalError
+from symbolchain.symbol.Network import Network
 
-from rest.db.SymbolDatabase import ReceiptQuery, ReceiptRecord, SortOrder, SymbolDataUnavailable, TransactionQuery
+from rest.db.SymbolDatabase import (
+	BlockStatisticsRecord,
+	NamespaceQuery,
+	ReceiptQuery,
+	ReceiptRecord,
+	SortOrder,
+	SymbolDatabase,
+	SymbolDataUnavailable,
+	TransactionQuery
+)
 from rest.facade.SymbolRestFacade import SymbolRestFacade
 
 from ..test.SymbolHealthTestUtils import create_symbol_health
@@ -42,6 +54,18 @@ class UnreadableBlocksSymbolDatabase:
 		raise SymbolDataUnavailable('Symbol block data is unavailable')
 
 
+class MosaicsReadErrorSymbolDatabase:
+	@staticmethod
+	def get_mosaics(_limit, _offset, _sort):
+		raise PsycopgError('database unavailable')
+
+
+class UnreadableMosaicsSymbolDatabase:
+	@staticmethod
+	def get_mosaics(_limit, _offset, _sort):
+		raise SymbolDataUnavailable('Symbol mosaic data is unavailable')
+
+
 class HealthySymbolDatabase:
 	@staticmethod
 	def check_connection():
@@ -55,6 +79,18 @@ class HealthySymbolDatabase:
 			'finalized_height': 8,
 			'last_synced_height': 10,
 			'updated_at': None
+		}
+
+
+class TimestampedHealthySymbolDatabase(HealthySymbolDatabase):
+	@staticmethod
+	def try_get_sync_state():
+		return {
+			'status': 'healthy',
+			'chain_height': 10,
+			'finalized_height': 8,
+			'last_synced_height': 10,
+			'updated_at': datetime(2026, 1, 2, 8, 4, 5, 987654, tzinfo=timezone(timedelta(hours=5)))
 		}
 
 
@@ -148,6 +184,40 @@ class BlockSymbolDatabase:
 		return BlockView() if 1 == height else None
 
 
+class BlockStatisticsSymbolDatabase:
+	def __init__(self):
+		self.called = False
+
+	def get_block_statistics(self):
+		self.called = True
+		return [
+			BlockStatisticsRecord(1, datetime(2026, 1, 1, tzinfo=timezone.utc), 1000000, 10 ** 12),
+			BlockStatisticsRecord(2, datetime(2026, 1, 1, 0, 0, 30, tzinfo=timezone.utc), 3000000, 12 * 10 ** 12)
+		]
+
+
+class MosaicView:
+	def __init__(self, mosaic_id):
+		self.mosaic_id = mosaic_id
+
+	def to_dict(self):
+		return {'id': self.mosaic_id}
+
+
+class MosaicSymbolDatabase:
+	def __init__(self, mosaics):
+		self.mosaics = mosaics
+		self.limit = None
+		self.offset = None
+		self.sort = None
+
+	def get_mosaics(self, limit, offset, sort):
+		self.limit = limit
+		self.offset = offset
+		self.sort = sort
+		return self.mosaics
+
+
 class ReceiptSymbolDatabase:
 	def __init__(self, receipts):
 		self.receipts = receipts
@@ -168,6 +238,24 @@ class TransactionSymbolDatabase:
 		return self.transactions
 
 
+class NamespaceSymbolDatabase:
+	def __init__(self, namespaces):
+		self.namespaces = namespaces
+		self.query = None
+
+	def get_namespaces(self, query):
+		self.query = query
+		return self.namespaces
+
+
+class NamespaceView:
+	def __init__(self, value):
+		self.value = value
+
+	def to_dict(self):
+		return self.value
+
+
 class ReceiptReadErrorSymbolDatabase:
 	@staticmethod
 	def get_receipts(_query):
@@ -175,14 +263,27 @@ class ReceiptReadErrorSymbolDatabase:
 
 
 def _create_configured_facade():
-	return SymbolRestFacade(HealthySymbolDatabase(), _create_node_config(), NATIVE_MOSAIC_INFO)
+	return SymbolRestFacade(HealthySymbolDatabase(), _create_node_config(), NATIVE_MOSAIC_INFO, Network.TESTNET)
 
 
 def _create_facade_with_database(symbol_db):
-	return SymbolRestFacade(symbol_db, _create_node_config(), NATIVE_MOSAIC_INFO)
+	return SymbolRestFacade(symbol_db, _create_node_config(), NATIVE_MOSAIC_INFO, Network.TESTNET)
 
 
 class SymbolRestFacadeTest(TestCase):  # pylint: disable=too-many-public-methods
+	def test_get_namespaces_formats_each_view(self):
+		# Arrange:
+		expected = [{'id': 'A95F1F8A96159516'}]
+		database = NamespaceSymbolDatabase([NamespaceView(expected[0])])
+		facade = _create_facade_with_database(database)
+
+		# Act:
+		result = facade.get_namespaces(NamespaceQuery())
+
+		# Assert:
+		self.assertEqual(expected, result)
+		self.assertEqual(NamespaceQuery(), database.query)
+
 	def test_get_transactions_passes_query(self):
 		# Arrange:
 		query = TransactionQuery()
@@ -205,7 +306,7 @@ class SymbolRestFacadeTest(TestCase):  # pylint: disable=too-many-public-methods
 			ValueError,
 			'Symbol database is required'
 		):
-			SymbolRestFacade(None, node_config, NATIVE_MOSAIC_INFO)
+			SymbolRestFacade(None, node_config, NATIVE_MOSAIC_INFO, Network.TESTNET)
 
 	def test_rejects_missing_node_config(self):
 		# Act + Assert:
@@ -213,12 +314,19 @@ class SymbolRestFacadeTest(TestCase):  # pylint: disable=too-many-public-methods
 			ValueError,
 			'Symbol node configuration is required'
 		):
-			SymbolRestFacade(object(), None, NATIVE_MOSAIC_INFO)
+			SymbolRestFacade(object(), None, NATIVE_MOSAIC_INFO, Network.TESTNET)
 
 	def test_rejects_missing_native_mosaic_info(self):
 		# Arrange + Act + Assert:
 		with self.assertRaisesRegex(ValueError, 'Native mosaic information is required'):
-			SymbolRestFacade(object(), _create_node_config(), None)
+			SymbolRestFacade(object(), _create_node_config(), None, Network.TESTNET)
+
+	def test_rejects_missing_network(self):
+		# Arrange + Act + Assert:
+		with self.assertRaises(ValueError) as exception_info:
+			SymbolRestFacade(object(), _create_node_config(), NATIVE_MOSAIC_INFO, None)
+		self.assertIs(ValueError, type(exception_info.exception))
+		self.assertEqual('Symbol network is required', str(exception_info.exception))
 
 	def test_reports_healthy_core_when_dependencies_are_available(self):
 		# Arrange:
@@ -238,6 +346,16 @@ class SymbolRestFacadeTest(TestCase):  # pylint: disable=too-many-public-methods
 			'status': 'healthy',
 			'errors': []
 		}, result)
+
+	def test_formats_health_sync_timestamp_as_utc_without_fractional_seconds(self):
+		# Arrange:
+		facade = _create_facade_with_database(TimestampedHealthySymbolDatabase())
+
+		# Act:
+		result = facade.get_health()
+
+		# Assert:
+		self.assertEqual('2026-01-02 03:04:05', result['lastDBSyncedAt'])
 
 	def test_reports_unsynced_when_healthy_state_is_behind_chain_height(self):
 		# Arrange:
@@ -362,6 +480,111 @@ class SymbolRestFacadeTest(TestCase):  # pylint: disable=too-many-public-methods
 		# Act + Assert:
 		with self.assertRaises(SymbolDataUnavailable):
 			facade.get_blocks(1, 10, SortOrder.DESC)
+
+	def test_get_block_statistics_formats_database_rows(self):
+		# Arrange:
+		symbol_db = BlockStatisticsSymbolDatabase()
+		facade = _create_facade_with_database(symbol_db)
+
+		# Act:
+		result = facade.get_block_statistics()
+
+		# Assert:
+		self.assertTrue(symbol_db.called)
+		self.assertEqual({
+			'blockTimeChart': [[2, 30.0]],
+			'blockFeeChart': [[1, 1.0], [2, 3.0]],
+			'blockDifficultyChart': [[1, '1.00'], [2, '12.00']],
+			'blockTime': 30,
+			'blockFee': 2.0,
+			'blockDifficulty': '12.00'
+		}, result)
+
+	def test_can_get_mosaics(self):
+		# Arrange:
+		symbol_db = MosaicSymbolDatabase([
+			MosaicView('1234567890ABCDEF'),
+			MosaicView('0000000000000001'),
+			MosaicView('234567890ABCDEF0')
+		])
+		facade = _create_facade_with_database(symbol_db)
+
+		# Act:
+		result = facade.get_mosaics(limit=3, offset=0, sort=SortOrder.DESC)
+
+		# Assert:
+		self.assertEqual([
+			{'id': '1234567890ABCDEF'},
+			{'id': '0000000000000001'},
+			{'id': '234567890ABCDEF0'}
+		], result)
+
+	def _assert_get_mosaics_passes_page_query_to_database(self, sort):
+		# Arrange:
+		symbol_db = MosaicSymbolDatabase([])
+		facade = _create_facade_with_database(symbol_db)
+
+		# Act:
+		facade.get_mosaics(limit=10, offset=20, sort=sort)
+
+		# Assert:
+		self.assertEqual(10, symbol_db.limit)
+		self.assertEqual(20, symbol_db.offset)
+		self.assertEqual(sort, symbol_db.sort)
+
+	def test_get_mosaics_passes_ascending_page_query_to_database(self):
+		self._assert_get_mosaics_passes_page_query_to_database(SortOrder.ASC)
+
+	def test_get_mosaics_passes_descending_page_query_to_database(self):
+		self._assert_get_mosaics_passes_page_query_to_database(SortOrder.DESC)
+
+	def test_get_mosaics_returns_empty_page(self):
+		# Arrange:
+		facade = _create_facade_with_database(MosaicSymbolDatabase([]))
+
+		# Act:
+		result = facade.get_mosaics(limit=10, offset=0, sort=SortOrder.DESC)
+
+		# Assert:
+		self.assertEqual([], result)
+
+	def test_get_mosaics_raises_when_database_read_fails(self):
+		# Arrange:
+		facade = _create_facade_with_database(MosaicsReadErrorSymbolDatabase())
+
+		# Act + Assert:
+		with self.assertRaises(PsycopgError):
+			facade.get_mosaics(10, 0, SortOrder.DESC)
+
+	def test_get_mosaics_propagates_unreadable_data(self):
+		# Arrange:
+		facade = _create_facade_with_database(UnreadableMosaicsSymbolDatabase())
+
+		# Act + Assert:
+		with self.assertRaisesRegex(SymbolDataUnavailable, 'Symbol mosaic data is unavailable'):
+			facade.get_mosaics(10, 0, SortOrder.DESC)
+
+	def test_can_get_mosaic(self):
+		# Arrange:
+		symbol_db = create_autospec(SymbolDatabase, instance=True, spec_set=True)
+		symbol_db.get_mosaic.return_value = MosaicView('72C0212E67A08BCE')
+		facade = _create_facade_with_database(symbol_db)
+
+		# Act:
+		result = facade.get_mosaic('72C0212E67A08BCE')
+
+		# Assert:
+		self.assertEqual({'id': '72C0212E67A08BCE'}, result)
+		symbol_db.get_mosaic.assert_called_once_with('72C0212E67A08BCE')
+
+	def test_get_mosaic_returns_none_when_missing(self):
+		# Arrange:
+		symbol_db = create_autospec(SymbolDatabase, instance=True, spec_set=True)
+		symbol_db.get_mosaic.return_value = None
+		facade = _create_facade_with_database(symbol_db)
+
+		# Act + Assert:
+		self.assertIsNone(facade.get_mosaic('72C0212E67A08BCE'))
 
 	def test_can_get_block_detail(self):
 		# Arrange:

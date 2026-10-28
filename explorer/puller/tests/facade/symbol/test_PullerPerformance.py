@@ -17,6 +17,7 @@ from .puller_test_utils import (
 	FakeConnector,
 	NoOpRateLimiter,
 	SymbolPullerTestBase,
+	create_adaptive_batch_fixture,
 	create_amount_statement_item,
 	create_complete_aggregate_pair,
 	create_multi_batch_block_pages,
@@ -319,8 +320,8 @@ class SymbolPullerPerformanceTest(SymbolPullerTestBase):
 			'http_get_attempt_count': 4,
 			'http_post_attempt_count': 1,
 			'rate_limit_wait_ms': 0,
-			'db_commit_count': 7,
-			'db_commit_attempt_count': 7,
+			'db_commit_count': 8,
+			'db_commit_attempt_count': 8,
 			'dirty_account_count': 1,
 			'dirty_namespace_count': 0,
 			'dirty_mosaic_count': 0,
@@ -350,8 +351,8 @@ class SymbolPullerPerformanceTest(SymbolPullerTestBase):
 			'http_get_attempt_count': 7,
 			'http_post_attempt_count': 1,
 			'rate_limit_wait_ms': 0,
-			'db_commit_count': 9,
-			'db_commit_attempt_count': 9,
+			'db_commit_count': 10,
+			'db_commit_attempt_count': 10,
 			'dirty_account_count': 1,
 			'dirty_namespace_count': 0,
 			'dirty_mosaic_count': 0,
@@ -453,6 +454,7 @@ class SymbolPullerPerformanceTest(SymbolPullerTestBase):
 		self.assertEqual(1, batch_events[1]['block_count'])
 		self.assertEqual(2, workflow_event['batch_count'])
 		self.assertEqual(1001, workflow_event['block_count'])
+		self.assertEqual(1001, workflow_event['last_completed_height'])
 		self.assertEqual(
 			sum(event['http_attempt_count'] for event in batch_events),
 			workflow_event['http_attempt_count'] - 3)
@@ -460,9 +462,49 @@ class SymbolPullerPerformanceTest(SymbolPullerTestBase):
 			sum(event['db_commit_count'] for event in batch_events),
 			workflow_event['db_commit_count'] - 2)
 		self.assertEqual(22, workflow_event['http_attempt_count'])
-		self.assertEqual(2014, workflow_event['db_commit_count'])
+		self.assertEqual(2016, workflow_event['db_commit_count'])
 		self.assertIsNone(workflow_event['failed_phase'])
-		self.assertEqual(1001, workflow_event['last_completed_height'])
+
+	def test_sync_block_headers_attributes_adaptive_prefetch_metrics_to_first_range(self):
+		# Arrange:
+		self.puller._max_transactions_per_batch = 5  # pylint: disable=protected-access
+		self.puller._time_source = IncrementingClock()  # pylint: disable=protected-access
+		blocks, transaction_pages, statement_pages = create_adaptive_batch_fixture(
+			(2, 3, 1, 4, 0, 2, 0),
+			((1, 2), (3, 5), (6, 7)))
+		connector = FakeConnector(
+			7,
+			{0: blocks},
+			finalized_height=7,
+			transactions_by_path=transaction_pages,
+			statement_pages=statement_pages)
+
+		# Act:
+		events = self._run_sync(connector)
+
+		# Assert:
+		batch_events = events[:3]
+		workflow_event = events[3]
+		self.assertEqual([[1, 2], [3, 5], [6, 7]], [
+			[event['start_height'], event['end_height']] for event in batch_events])
+		self.assertEqual([2, 3, 2], [event['block_count'] for event in batch_events])
+		self.assertEqual([5, 5, 2], [event['transaction_count'] for event in batch_events])
+		self.assertEqual(3, workflow_event['batch_count'])
+		self.assertEqual(7, workflow_event['block_count'])
+		self.assertEqual(12, workflow_event['transaction_count'])
+		self.assertEqual(7, workflow_event['last_completed_height'])
+		self.assertEqual(1, batch_events[0]['http_get_attempts_by_category']['block'])
+		self.assertEqual([0, 0], [
+			event['http_get_attempts_by_category']['block'] for event in batch_events[1:]])
+		self.assertEqual(1, workflow_event['http_get_attempts_by_category']['block'])
+		self.assertEqual(batch_events[0]['block_fetch_ms'], workflow_event['block_fetch_ms'])
+		self.assertEqual([0, 0], [event['block_fetch_ms'] for event in batch_events[1:]])
+		self.assertEqual([
+			transaction_path(1, 2), transaction_path(3, 5), transaction_path(6, 7)
+		], [path for path in connector.paths if path.startswith('transactions/confirmed?')])
+		self.assertEqual([
+			statement_path(1, 2), statement_path(3, 5), statement_path(6, 7)
+		], [path for path in connector.paths if path.startswith('statements/transaction?')])
 
 	def test_sync_block_headers_records_last_completed_height_when_a_later_batch_fails(self):
 		# Arrange:
@@ -487,7 +529,7 @@ class SymbolPullerPerformanceTest(SymbolPullerTestBase):
 			sum(event['http_attempt_count'] for event in events[:2]) + 3,
 			events[2]['http_attempt_count'])
 		self.assertEqual(
-			sum(event['db_commit_count'] for event in events[:2]) + 1,
+			sum(event['db_commit_count'] for event in events[:2]),
 			events[2]['db_commit_count'])
 
 	def test_sync_block_headers_logs_failed_phase_and_preserves_original_exception(self):
@@ -804,10 +846,10 @@ class SymbolPullerPerformanceTest(SymbolPullerTestBase):
 			'block_fetch_ms', 'transaction_fetch_ms', 'receipt_fetch_ms', 'resolution_fetch_ms', 'account_fetch_ms',
 			'namespace_fetch_ms', 'mosaic_fetch_ms', 'metadata_fetch_ms', 'hash_lock_fetch_ms',
 			'secret_lock_fetch_ms', 'mosaic_restriction_fetch_ms')})
-		self.assertEqual(7, batch_event['db_commit_ms'])
-		self.assertEqual(7, batch_event['db_commit_count'])
-		self.assertEqual(9, workflow_event['db_commit_ms'])
-		self.assertEqual(9, workflow_event['db_commit_count'])
+		self.assertEqual(8, batch_event['db_commit_ms'])
+		self.assertEqual(8, batch_event['db_commit_count'])
+		self.assertEqual(10, workflow_event['db_commit_ms'])
+		self.assertEqual(10, workflow_event['db_commit_count'])
 		self.assertEqual(2, workflow_event['db_commit_ms'] - batch_event['db_commit_ms'])
 		self.assertEqual(2, workflow_event['db_commit_count'] - batch_event['db_commit_count'])
 		expected_batch_db_write_times = {

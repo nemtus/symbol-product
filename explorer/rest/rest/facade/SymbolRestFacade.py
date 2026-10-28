@@ -2,6 +2,9 @@ from common.symbol.NativeMosaic import NativeMosaicInfo
 from psycopg2 import Error as PsycopgError
 from zenlog import log
 
+from rest.model.symbol.Account import SymbolAccountListView, SymbolAccountView
+from rest.model.symbol.Block import SymbolBlockStatisticsView
+from rest.model.symbol.format import format_timestamp
 from rest.model.symbol.Receipt import SymbolReceiptView
 from rest.model.symbol.Transaction import SymbolTransactionView
 
@@ -11,7 +14,10 @@ DATABASE_UNAVAILABLE_MESSAGE = 'Symbol database is unavailable'
 class SymbolRestFacade:
 	"""Symbol Rest Facade."""
 
-	def __init__(self, symbol_db, node_config, native_mosaic_info):
+	# The facade constructor owns each independently configured REST dependency.
+	def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+		self, symbol_db, node_config, native_mosaic_info, network, account_refresh_max_age_seconds=None,
+		harvesting_active_window_days=None):
 		"""Creates a Symbol facade with its required database and node dependencies."""
 
 		if symbol_db is None:
@@ -22,9 +28,15 @@ class SymbolRestFacade:
 		if not isinstance(native_mosaic_info, NativeMosaicInfo):
 			raise ValueError('Native mosaic information is required')
 
+		if network is None:
+			raise ValueError('Symbol network is required')
+
 		self.symbol_db = symbol_db
 		self.node_config = node_config
 		self.native_mosaic_info = native_mosaic_info
+		self.network = network
+		self.account_refresh_max_age_seconds = account_refresh_max_age_seconds
+		self.harvesting_active_window_days = harvesting_active_window_days
 
 	def get_health(self):
 		"""Gets health of the Symbol backend core foundation."""
@@ -61,7 +73,7 @@ class SymbolRestFacade:
 				chain_height = sync_state.get('chain_height')
 				finalized_height = sync_state['finalized_height']
 				last_db_height = sync_state['last_synced_height']
-				last_db_synced_at = sync_state['updated_at'].isoformat() if sync_state['updated_at'] else None
+				last_db_synced_at = format_timestamp(sync_state['updated_at'])
 				status = sync_state['status']
 				backend_synced = 'healthy' == status and last_db_height == chain_height
 				if 'healthy' == status and not backend_synced:
@@ -97,6 +109,56 @@ class SymbolRestFacade:
 		blocks = self.symbol_db.get_blocks(from_height, limit, sort)
 		return [block.to_dict(self.native_mosaic_info) for block in blocks]
 
+	def get_block_statistics(self):
+		"""Gets Symbol block statistics."""
+
+		blocks = self.symbol_db.get_block_statistics()
+		return SymbolBlockStatisticsView(blocks).to_dict(self.native_mosaic_info)
+
+	def get_mosaics(self, limit, offset, sort):
+		"""Gets a current mosaic page."""
+
+		mosaics = self.symbol_db.get_mosaics(limit, offset, sort)
+		return [mosaic.to_dict() for mosaic in mosaics]
+
+	def get_namespaces(self, query):
+		"""Gets a persisted Symbol namespace page."""
+
+		namespaces = self.symbol_db.get_namespaces(query)
+		return [namespace.to_dict() for namespace in namespaces]
+
+	def try_get_namespace(self, namespace_id):
+		"""Gets one persisted Symbol namespace detail DTO."""
+
+		detail = self.symbol_db.try_get_namespace(namespace_id)
+		if detail is None:
+			return None
+
+		result = detail.namespace.to_dict()
+		result['subNamespaces'] = detail.sub_namespaces
+		result['namespaceMosaics'] = [
+			{
+				'namespaceId': group.namespace_id,
+				'namespaceName': group.namespace_name,
+				'data': [
+					{key: value for key, value in {
+						**mosaic.view.to_dict(),
+						'startTimestamp': format_timestamp(mosaic.start_timestamp)
+					}.items() if key != 'registrationTimestamp'}
+					for mosaic in group.data
+				]
+			}
+			for group in detail.namespace_mosaics
+		]
+		return result
+
+	def get_mosaic(self, mosaic_id):
+		"""Gets a current mosaic by mosaic ID or namespace ID."""
+
+		mosaic = self.symbol_db.get_mosaic(mosaic_id)
+
+		return mosaic.to_dict() if mosaic else None
+
 	def get_block(self, height):
 		"""Gets a Symbol block by height."""
 
@@ -118,3 +180,21 @@ class SymbolRestFacade:
 
 		transactions = self.symbol_db.get_transactions(query)
 		return [SymbolTransactionView(transaction).to_dict(self.native_mosaic_info) for transaction in transactions]
+
+	def try_get_account(self, address=None, public_key=None):
+		"""Gets a Symbol account detail DTO by address or public key."""
+
+		account = self.symbol_db.try_get_account(address, public_key)
+		return SymbolAccountView(account, self.network, self.native_mosaic_info).to_dict() if account else None
+
+	def get_accounts(self, query):
+		"""Gets snapshot-backed Symbol account list DTOs."""
+
+		if self.account_refresh_max_age_seconds is None:
+			raise ValueError('Symbol account refresh max age is required')
+		if self.harvesting_active_window_days is None:
+			raise ValueError('Symbol harvesting active window is required')
+
+		accounts = self.symbol_db.get_account_list(
+			query, self.account_refresh_max_age_seconds, self.harvesting_active_window_days)
+		return [SymbolAccountListView(account, self.network, self.native_mosaic_info).to_dict() for account in accounts]
