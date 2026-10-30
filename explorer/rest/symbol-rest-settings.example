@@ -2,11 +2,29 @@
 # Set EXPLORER_REST_SETTINGS to the deployment-specific settings file.
 REST_CHAIN = "symbol"
 
+# Required Symbol network name. It must match the Node, database and native
+# mosaic group: exactly "mainnet" or "testnet".
+NETWORK_NAME = "testnet"
+
 # Replace the placeholder with the XYM mosaic ID for the same network as the
 # configured Symbol Node and Symbol database. This value is intentionally not
 # a mainnet or testnet ID.
 SYMBOL_NATIVE_MOSAIC_ID = "REPLACE_WITH_16_HEX_NETWORK_NATIVE_MOSAIC_ID"
 
+# Required maximum age of the latest successful account refresh, in seconds.
+SYMBOL_ACCOUNT_REFRESH_MAX_AGE_SECONDS = 7200
+
+# Required number of UTC days used to calculate request-time harvesting activity.
+SYMBOL_HARVESTING_ACTIVE_WINDOW_DAYS = 7
+
+# Required inclusive eligibility range in raw atomic units from the account
+# refresh snapshot. Configure values for the same network as the Node, DB and
+# native mosaic ID above; no production network values are inferred here.
+SYMBOL_HARVESTING_MIN_BALANCE = "REPLACE_WITH_MINIMUM_ATOMIC_BALANCE"
+SYMBOL_HARVESTING_MAX_BALANCE = "REPLACE_WITH_MAXIMUM_ATOMIC_BALANCE"
+
 # REST targets mainnet/testnet XYM and uses the fixed XYM_DIVISIBILITY = 6.
 # Format validation cannot detect a Node/DB/native-ID network mismatch. Deploy
-# the Node, DB and native ID as one network-specific group.
+# the Node, DB, native ID and harvesting bounds as one network-specific group.
+# Restart REST after changing settings. Format validation does not prove the
+# bounds match Node protocol settings; verify those values for the deployment.

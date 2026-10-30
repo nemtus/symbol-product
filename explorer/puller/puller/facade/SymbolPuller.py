@@ -75,6 +75,7 @@ METADATA_FETCH_CONCURRENCY = 10
 LOCK_FETCH_CONCURRENCY = 10
 MOSAIC_RESTRICTION_FETCH_CONCURRENCY = 10
 DEFAULT_MAX_REQUESTS_PER_SECOND = 20
+DEFAULT_MAX_TRANSACTIONS_PER_BATCH = 100_000
 ACCOUNT_PAGE_SIZE = 100
 NEMESIS_PREVIOUS_BLOCK_HASH = bytes(32)
 # Namespace detail and account multisig fetches use one request per item in a max-size batch.
@@ -128,9 +129,13 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 		time_source=time.monotonic,
 		performance_logger=log,
 		connector_factory=SymbolPullerConnector,
-		cleanup_logger=log
+		cleanup_logger=log,
+		max_transactions_per_batch=DEFAULT_MAX_TRANSACTIONS_PER_BATCH
 	):
 		"""Creates a Symbol puller facade object."""
+
+		if not is_exact_integer(max_transactions_per_batch) or max_transactions_per_batch < 1:
+			raise ValueError('max_transactions_per_batch must be greater than or equal to 1')
 
 		config = configparser.ConfigParser()
 		config.read(config_file)
@@ -154,6 +159,7 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 		self.symbol_facade = SymbolFacade(_get_symbol_network(network_type))
 		self._retry_delay = 2
 		self._rate_limiter = rate_limiter or RequestRateLimiter(max_requests_per_second, time_source=time_source)
+		self._max_transactions_per_batch = max_transactions_per_batch
 		self._native_mosaic_info = None
 		self._network_properties = None
 
@@ -332,8 +338,10 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 		except Exception as exception:
 			try:
 				sync_state = self.symbol_db.get_sync_state()
-				if sync_state and sync_state['dirty_state_from_height'] is not None:
-					self.symbol_db.mark_sync_unhealthy()
+				if sync_state:
+					self._record_performance('set_last_completed_height', sync_state['last_synced_height'])
+					if sync_state['dirty_state_from_height'] is not None:
+						self.symbol_db.mark_sync_unhealthy()
 			except Exception as state_error:  # pylint: disable=broad-exception-caught
 				# Preserve the primary failure if the best-effort failure-state update also fails.
 				log.error(f'Failed to record Symbol sync failure: {state_error}')
@@ -343,7 +351,7 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 		finally:
 			self._active_performance = None
 
-	async def _sync_block_headers(self, max_height=None):  # pylint: disable=too-many-locals
+	async def _sync_block_headers(self, max_height=None):  # pylint: disable=too-many-locals,too-many-statements
 		"""Runs one non-overlapping Symbol block synchronization attempt."""
 
 		self._record_performance('set_phase', 'chain_info_fetch')
@@ -355,6 +363,10 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 		finalized_height, finalized_hash, finalized_epoch, finalized_point, is_finalization_capped = (
 			self._get_finalized_watermark(chain_info, chain_height)
 		)
+		finalization_epoch_grouping = int(network_properties['chain']['votingSetGrouping']) if is_finalization_capped else None
+		if is_finalization_capped and finalization_epoch_grouping <= 0:
+			# Reject non-positive grouping values before block writes.
+			raise ValueError('Symbol chain.votingSetGrouping must be greater than zero')
 		epoch_adjustment_seconds = self._parse_epoch_adjustment(network_properties)
 		self._record_performance('set_phase', 'native_mosaic_fetch')
 		native_mosaic_info = await self._get_native_mosaic_info()
@@ -401,12 +413,24 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 		self._active_performance.set_bounds(start_height, chain_height)
 
 		self._record_performance('set_phase', 'block_sync')
+		checkpoint_state = {
+			'chain_height': chain_height,
+			'finalized_height': finalized_height,
+			'finalized_hash': finalized_hash,
+			'finalized_epoch': finalized_epoch,
+			'finalized_point': finalized_point,
+			'is_finalization_capped': is_finalization_capped,
+			'finalization_epoch_grouping': finalization_epoch_grouping,
+			'previous_checkpoint_height': (
+				bounded_sync_state['last_synced_height']
+				if bounded_sync_state and bounded_sync_state['last_synced_height'] else None)
+		}
 		last_synced_height, last_synced_block_hash = await self._sync_block_pages(
 			start_height,
 			chain_height,
 			epoch_adjustment_seconds,
 			native_mosaic_info,
-			finalized_height)
+			checkpoint_state)
 		if last_synced_height is None and bounded_sync_state:
 			last_synced_height = bounded_sync_state['last_synced_height']
 			last_synced_block_hash = bounded_sync_state['last_synced_block_hash']
@@ -415,22 +439,62 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 			finalized_hash = last_synced_block_hash if finalized_height == last_synced_height else self.symbol_db.get_block_hash(finalized_height)
 			if not finalized_hash:
 				raise ValueError(f'Unable to determine finalized hash for height {finalized_height}')
+			checkpoint_state = {**checkpoint_state, 'finalized_hash': finalized_hash}
 
 		self._record_performance('set_phase', 'finalization_lock_cleanup')
 		await self._sync_finalization_lock_cleanup(finalized_height)
 
 		self._record_performance('set_phase', 'sync_state_write')
-		self.symbol_db.upsert_sync_state({
+		self.symbol_db.upsert_sync_state(self._create_published_sync_state(
+			checkpoint_state,
+			last_synced_height,
+			last_synced_block_hash))
+
+	@staticmethod
+	def _create_published_sync_state(
+		checkpoint_state,
+		last_synced_height,
+		last_synced_block_hash
+	):
+		"""Builds sync state whose finalization fields do not exceed the persisted checkpoint."""
+
+		finalized_height = checkpoint_state['finalized_height']
+		finalized_hash = checkpoint_state['finalized_hash']
+		finalized_epoch = checkpoint_state['finalized_epoch']
+		finalized_point = checkpoint_state['finalized_point']
+		if not last_synced_height:
+			published_finalized_height = None
+			published_finalized_hash = None
+			published_finalized_epoch = None
+			published_finalized_point = None
+		elif finalized_height <= last_synced_height:
+			published_finalized_height = finalized_height
+			published_finalized_hash = finalized_hash or (
+				last_synced_block_hash if finalized_height == last_synced_height else None)
+			published_finalized_epoch = finalized_epoch
+			published_finalized_point = finalized_point
+		else:
+			published_finalized_height = last_synced_height
+			published_finalized_hash = last_synced_block_hash
+			published_finalized_epoch = None
+			published_finalized_point = None
+		if checkpoint_state['is_finalization_capped'] and published_finalized_height:
+			published_finalized_epoch = SymbolPuller._calculate_finalization_epoch(
+				published_finalized_height,
+				checkpoint_state['finalization_epoch_grouping'])
+			published_finalized_point = None
+
+		return {
 			'status': 'healthy',
-			'chain_height': chain_height,
-			'finalized_height': finalized_height,
-			'finalized_hash': finalized_hash,
-			'finalized_epoch': finalized_epoch,
-			'finalized_point': finalized_point,
+			'chain_height': checkpoint_state['chain_height'],
+			'finalized_height': published_finalized_height,
+			'finalized_hash': published_finalized_hash,
+			'finalized_epoch': published_finalized_epoch,
+			'finalized_point': published_finalized_point,
 			'last_synced_height': last_synced_height,
 			'last_synced_block_hash': last_synced_block_hash,
 			'dirty_state_from_height': None
-		})
+		}
 
 	@staticmethod
 	def _get_sync_chain_height(node_chain_height, max_height):
@@ -455,6 +519,15 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 			finalized_block['finalizationPoint'],
 			False
 		)
+
+	@staticmethod
+	def _calculate_finalization_epoch(height, grouping):
+		"""Calculates the core finalization epoch for a positive height and grouping."""
+
+		if 1 == height:
+			return 1
+
+		return 1 + (height + grouping - 1) // grouping
 
 	def _get_bounded_sync_state(self, sync_state, chain_height):
 		"""Returns the state used for this run's forward-sync watermark."""
@@ -583,7 +656,7 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 		chain_height,
 		epoch_adjustment_seconds,
 		native_mosaic_info,
-		observed_finalized_height=None
+		checkpoint_state
 	):
 		last_synced_height = None
 		last_synced_block_hash = None
@@ -595,8 +668,8 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 			batch = self._active_performance.start_batch(
 				batch_offsets[0] + 1,
 				min(chain_height, batch_offsets[-1] + MAX_PAGE_SIZE))
+			is_final_batch = False
 			try:
-				is_final_batch = False
 				with batch.measure('block_fetch_ms', 'block_fetch'):
 					pages = await asyncio.gather(*[self._get_block_page(offset) for offset in batch_offsets])
 
@@ -630,19 +703,45 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 							batch.set_range(batch_rows[0]['height'], batch_rows[-1]['height'])
 							is_final_batch = True
 							break
+			except Exception as exception:
+				# Ranges aren't known until the entire block-fetch window is available.
+				self._active_performance.fail_batch(batch)
+				self._log_performance_event(
+					batch, 'symbol_sync_batch_failed', 'failed', exception)
+				raise
 
-				if is_final_batch:
-					await self._sync_block_batch_with_dirty_state(
-						batch_rows, epoch_adjustment_seconds, native_mosaic_info, batch, observed_finalized_height)
-					self._active_performance.complete_batch(batch)
-					self._log_performance_event(
-						batch, 'symbol_sync_batch_completed', 'completed')
-					return last_synced_height, last_synced_block_hash
+			await self._sync_block_rows_in_ranges(
+				batch_rows, epoch_adjustment_seconds, native_mosaic_info, checkpoint_state, batch)
+			if is_final_batch:
+				return last_synced_height, last_synced_block_hash
 
-				batch.set_range(batch_rows[0]['height'], batch_rows[-1]['height'])
+		return last_synced_height, last_synced_block_hash
+
+	async def _sync_block_rows_in_ranges(
+		self,
+		block_rows,
+		epoch_adjustment_seconds,
+		native_mosaic_info,
+		checkpoint_state,
+		batch
+	):
+		"""Completes and checkpoints each transaction-count-limited block range."""
+
+		block_ranges = self._split_block_rows_by_transaction_count(block_rows, self._max_transactions_per_batch)
+		# Attribute the shared block-prefetch timing and request counts to the first range only.
+		for range_index, range_rows in enumerate(block_ranges):
+			if range_index:
+				batch = self._active_performance.start_batch(
+					range_rows[0]['height'], range_rows[-1]['height'])
+			else:
+				batch.set_range(range_rows[0]['height'], range_rows[-1]['height'])
+			batch.set_count('block_count', len(range_rows))
+			try:
 				await self._sync_block_batch_with_dirty_state(
-					batch_rows, epoch_adjustment_seconds, native_mosaic_info, batch, observed_finalized_height)
-				self._active_performance.complete_batch(batch)
+					range_rows, epoch_adjustment_seconds, native_mosaic_info, batch, checkpoint_state)
+				self._checkpoint_sync_batch(range_rows, checkpoint_state, batch)
+				self._record_performance('complete_batch', batch)
+				self._record_performance('set_last_completed_height', batch.end_height)
 				self._log_performance_event(
 					batch, 'symbol_sync_batch_completed', 'completed')
 			except Exception as exception:
@@ -651,7 +750,58 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 					batch, 'symbol_sync_batch_failed', 'failed', exception)
 				raise
 
-		return last_synced_height, last_synced_block_hash
+	@staticmethod
+	def _split_block_rows_by_transaction_count(block_rows, max_transactions_per_batch=DEFAULT_MAX_TRANSACTIONS_PER_BATCH):
+		"""Partitions contiguous block rows using their embedded-inclusive transaction counts."""
+
+		if not block_rows:
+			return []
+
+		ranges = []
+		current_range = []
+		current_transaction_count = 0
+		for row in block_rows:
+			transaction_count = row['total_transactions_count']
+			if current_range and current_transaction_count + transaction_count > max_transactions_per_batch:
+				ranges.append(current_range)
+				current_range = []
+				current_transaction_count = 0
+
+			current_range.append(row)
+			current_transaction_count += transaction_count
+
+		if current_range:
+			ranges.append(current_range)
+
+		return ranges
+
+	def _checkpoint_sync_batch(self, batch_rows, checkpoint_state, batch):
+		"""Publishes a completely written batch before performance state or later work advances."""
+
+		last_row = batch_rows[-1]
+		self._validate_new_finalized_block_hash(last_row['height'], checkpoint_state)
+		batch.set_phase('checkpoint_commit')
+		self.symbol_db.checkpoint_sync_state(self._create_published_sync_state(
+			checkpoint_state,
+			last_row['height'],
+			last_row['hash']))
+
+	def _validate_new_finalized_block_hash(self, batch_end_height, checkpoint_state):
+		"""Rejects a newly covered finalized hash that disagrees with persisted block evidence."""
+
+		if checkpoint_state['is_finalization_capped'] or not checkpoint_state['finalized_hash']:
+			return
+
+		finalized_height = checkpoint_state['finalized_height']
+		previous_checkpoint_height = checkpoint_state['previous_checkpoint_height'] or 0
+		if finalized_height <= previous_checkpoint_height or finalized_height > batch_end_height:
+			return
+
+		local_hash = self.symbol_db.get_block_hash(finalized_height)
+		if not local_hash:
+			raise SymbolRollbackError('Finalized block is missing from local database')
+		if bytes(local_hash) != bytes(checkpoint_state['finalized_hash']):
+			raise SymbolRollbackError('Finalized block hash does not match local database')
 
 	async def _sync_block_batch_with_dirty_state(  # pylint: disable=too-many-locals,too-many-statements
 		self,
@@ -659,8 +809,9 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 		epoch_adjustment_seconds,
 		native_mosaic_info,
 		batch,
-		observed_finalized_height=None
+		checkpoint_state
 	):
+		observed_finalized_height = checkpoint_state['finalized_height']
 		expected_transaction_counts = {
 			row['height']: TransactionCountExpectation(row['transactions_count'], row['total_transactions_count'])
 			for row in batch_rows
@@ -1163,9 +1314,12 @@ class SymbolPuller:  # pylint: disable=too-many-instance-attributes
 		for transaction_rows in transaction_rows_by_height.values():
 			for transaction_row in transaction_rows:
 				for address_row in transaction_row['address_rows']:
-					# Mosaic Address Restriction targets can have restriction state without account state,
-					# so keep the transaction relation but do not require an account refresh for this role.
-					if TransactionType.MOSAIC_ADDRESS_RESTRICTION.value == transaction_row['type'] and 'target' == address_row['role']:
+					# Address Restriction targets can have restriction state without account state, so keep the
+					# transaction relation but do not require an account refresh for this role.
+					if transaction_row['type'] in (
+						TransactionType.ACCOUNT_ADDRESS_RESTRICTION.value,
+						TransactionType.MOSAIC_ADDRESS_RESTRICTION.value
+					) and 'target' == address_row['role']:
 						continue
 
 					address = Address(address_row['address'])

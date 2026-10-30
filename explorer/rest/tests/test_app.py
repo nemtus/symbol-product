@@ -4,12 +4,13 @@ from pathlib import Path
 
 import pytest
 from common.symbol.NativeMosaic import NativeMosaicInfo
-from common.symbol.NodeConfiguration import SymbolNodeConfiguration, SymbolNodeConfigurationError
+from common.symbol.NodeConfiguration import SymbolNodeConfigurationError
 from common.tests.PostgresTestUtils import PostgresTestDatabase, drop_symbol_block_tables_if_present
 from flask import Flask, abort, jsonify
 from psycopg2 import OperationalError
 from psycopg2.pool import PoolError
 from puller.db.SymbolDatabase import SymbolDatabase as PullerSymbolDatabase
+from symbolchain.symbol.Network import Network
 
 from rest import create_app, load_rest_config, setup_error_handlers, setup_symbol_facade
 from rest.facade.SymbolRestFacade import SymbolRestFacade
@@ -45,6 +46,11 @@ SYMBOL_NODE_ALLOWED_HOSTS="localhost:3000"
 SYMBOL_NODE_ALLOW_LOOPBACK="true"
 SYMBOL_NODE_ALLOW_PRIVATE="false"
 SYMBOL_NATIVE_MOSAIC_ID="72C0212E67A08BCE"
+SYMBOL_ACCOUNT_REFRESH_MAX_AGE_SECONDS=7200
+SYMBOL_HARVESTING_ACTIVE_WINDOW_DAYS=7
+SYMBOL_HARVESTING_MIN_BALANCE=0
+SYMBOL_HARVESTING_MAX_BALANCE=18446744073709551615
+NETWORK_NAME="testnet"
 ''')
 	return app_config_path
 
@@ -246,6 +252,7 @@ def test_route_failure_closes_db_pool(rest_config_path, symbol_database_config):
 @pytest.mark.parametrize('url', [
 	pytest.param('/api/symbol/blocks', id='blocks-list'),
 	pytest.param('/api/symbol/block/1', id='block-detail'),
+	pytest.param('/api/symbol/block/statistics', id='block-statistics'),
 	pytest.param('/api/symbol/receipts', id='receipts-list'),
 	pytest.param('/api/symbol/block/1/receipts', id='block-receipts')
 ])
@@ -263,14 +270,19 @@ def test_injected_db_errors_return_503(rest_config_path, url):
 			raise OperationalError('database unavailable')
 
 		@staticmethod
+		def get_block_statistics():
+			raise OperationalError('database unavailable')
+
+		@staticmethod
 		def get_receipts(_query):
 			raise OperationalError('database unavailable')
 
 	def setup_facade(_app):
 		return SymbolRestFacade(
 			FailingDatabase(),
-			SymbolNodeConfiguration.from_url('http://127.0.0.1:3000', allow_loopback=True),
-			NativeMosaicInfo('72C0212E67A08BCE', 6))
+			object(),
+			NativeMosaicInfo('72C0212E67A08BCE', 6),
+			Network.TESTNET)
 
 	# Act:
 	app = create_app(rest_chain_handlers={'symbol': (setup_facade, setup_symbol_routes)})
@@ -421,6 +433,11 @@ SYMBOL_NODE_URL="http://localhost:3000"
 SYMBOL_NODE_ALLOWED_HOSTS="localhost:3000"
 SYMBOL_NODE_ALLOW_LOOPBACK="true"
 SYMBOL_NATIVE_MOSAIC_ID="72C0212E67A08BCE"
+SYMBOL_ACCOUNT_REFRESH_MAX_AGE_SECONDS=7200
+SYMBOL_HARVESTING_ACTIVE_WINDOW_DAYS=7
+SYMBOL_HARVESTING_MIN_BALANCE=0
+SYMBOL_HARVESTING_MAX_BALANCE=18446744073709551615
+NETWORK_NAME="testnet"
 ''')
 
 	# Act:
@@ -446,6 +463,11 @@ port = 5432
 REST_CHAIN="symbol"
 DATABASE_CONFIG_FILEPATH="{db_config_path}"
 SYMBOL_NATIVE_MOSAIC_ID="72C0212E67A08BCE"
+SYMBOL_ACCOUNT_REFRESH_MAX_AGE_SECONDS=7200
+SYMBOL_HARVESTING_ACTIVE_WINDOW_DAYS=7
+SYMBOL_HARVESTING_MIN_BALANCE=0
+SYMBOL_HARVESTING_MAX_BALANCE=18446744073709551615
+NETWORK_NAME="testnet"
 ''')
 
 	# Act:
@@ -474,6 +496,11 @@ SYMBOL_NODE_URL="http://localhost"
 SYMBOL_NODE_ALLOWED_HOSTS="localhost:80"
 SYMBOL_NODE_ALLOW_LOOPBACK="true"
 SYMBOL_NATIVE_MOSAIC_ID="72C0212E67A08BCE"
+SYMBOL_ACCOUNT_REFRESH_MAX_AGE_SECONDS=7200
+SYMBOL_HARVESTING_ACTIVE_WINDOW_DAYS=7
+SYMBOL_HARVESTING_MIN_BALANCE=0
+SYMBOL_HARVESTING_MAX_BALANCE=18446744073709551615
+NETWORK_NAME="testnet"
 ''')
 
 	# Act:
