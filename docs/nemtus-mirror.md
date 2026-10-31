@@ -45,9 +45,11 @@ the shoestring/lightapi package names are the `nemtus-*` names; `PackageResolver
 2. fast-path no-op if `dev` already contains every upstream commit;
 3. otherwise merges upstream into a `sync/upstream-<sha>` branch:
    - **clean merge** → opens a PR;
-   - **conflict** → aborts the merge and **fails the run**, writing the conflicting files and the local
-     resolution steps to the run's job summary. (This repo is an Issues-disabled fork, so the conflict
-     is signalled by the red run + summary rather than a tracking issue.)
+   - **conflict in the packaging `version` line only** (what an upstream version bump always produces)
+     → auto-resolved, then opens a PR that spells out the resolution (see below);
+   - **any other conflict** → aborts the merge and **fails the run**, writing the conflicting files and
+     the local resolution steps to the run's job summary. (This repo is an Issues-disabled fork, so the
+     conflict is signalled by the red run + summary rather than a tracking issue.)
 
 The sync PR is opened by `github-actions[bot]` (the built-in `GITHUB_TOKEN`), so its `ci.yml` runs start
 in an approval-required state: click **"Approve workflows to run"** in the PR merge box to run
@@ -63,11 +65,31 @@ Conflicts here are structural, not accidental: the mirror layer permanently rewr
 files (`lightapi/python/setup.cfg`, `tools/shoestring/pyproject.toml`, `PackageResolver.py`, …), so any
 upstream edit to them — most often a version bump — collides with the NEMTUS edit. They cannot be
 eliminated (a rename mirror must diverge on `name`/deps); the goal is to resolve them quickly and safely.
-Two aids:
+
+The most common one is resolved automatically. In both packaging files the `name` and `version` lines are
+adjacent, so an upstream version bump lands in the same diff hunk as the NEMTUS rename and git reports a
+conflict even though the resolution is purely mechanical. Left to a human this failed the daily sync on
+most upstream bumps, and the sync PRs piled up.
+`.github/scripts/auto-resolve-version-conflicts.py` (run by `mirror-sync.yml`, and by the local helper
+below) handles exactly that line:
+
+- it masks the version **value** with a sentinel in all three merge stages, retries the three-way merge,
+  and fills the sentinel back in with the higher of the two versions (PEP 440 ordering, so `0.0.10` vs
+  `0.0.13` → `0.0.13`, and a NEMTUS-only `0.2.4.post1` vs an unchanged upstream `0.2.4` → `0.2.4.post1`);
+- it therefore does **not** prefer a side — everything else in the file still comes from the normal
+  three-way merge, so an upstream dependency or classifier change is not silently dropped;
+- if the file still conflicts with the version line masked, upstream changed something that needs a human:
+  the file is left unmerged and the run falls through to the manual path (abort + job summary) unchanged.
+
+The version line it chose is quoted in the sync PR body. **Review it before merging** — it decides what
+the next release publishes to PyPI.
+
+Two further aids:
 
 - **Helper script** — do the mechanical part (add the `upstream` remote, fetch, create the
-  `sync/upstream-<sha>` branch, attempt the merge) and, on conflict, print the conflicting files, their
-  hunks, and the exact resolution/PR steps. The merge is left in progress for you to edit:
+  `sync/upstream-<sha>` branch, attempt the merge, auto-resolve the version line) and, on a conflict that
+  needs a human, print the conflicting files, their hunks, and the exact resolution/PR steps. The merge is
+  left in progress for you to edit:
 
   ```bash
   git checkout dev && git pull
@@ -75,8 +97,8 @@ Two aids:
   ```
 
 - **`git rerere`** — enable it once so git records each conflict resolution and replays it automatically
-  on the next structurally-identical conflict (e.g. the recurring version-bump conflict in `setup.cfg`).
-  A typical resolution is "keep the NEMTUS metadata, adopt upstream's version":
+  on the next structurally-identical conflict. This now covers the conflicts the auto-resolver declines
+  (it only ever touches the version line):
 
   ```bash
   git config rerere.enabled true

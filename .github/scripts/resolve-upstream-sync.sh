@@ -3,9 +3,10 @@
 # resolve-upstream-sync.sh
 #
 # Local helper for resolving an upstream mirror-sync conflict by hand. It mirrors what
-# .github/workflows/mirror-sync.yml does in CI, but is meant to run on a maintainer's machine:
-# it LEAVES the merge in progress on conflict (CI aborts it) so you can edit the conflict
-# hunks, and it prints the exact next steps (invariants check, push, PR).
+# .github/workflows/mirror-sync.yml does in CI, including the version-line auto-resolution
+# (.github/scripts/auto-resolve-version-conflicts.py), but is meant to run on a maintainer's
+# machine: when a conflict needs a human it LEAVES the merge in progress (CI aborts it) so you
+# can edit the conflict hunks, and it prints the exact next steps (invariants check, push, PR).
 #
 # Usage:
 #   bash .github/scripts/resolve-upstream-sync.sh                 # sync from symbol/product:dev
@@ -64,9 +65,29 @@ EOF
 	exit 0
 fi
 
-# 4. conflict — leave the merge in progress for manual resolution
+# 4. conflict — try the version-line auto-resolver first (same one CI runs), then fall back to manual
+say "CONFLICT while merging upstream@${UPSTREAM_SHA}; trying the version-line auto-resolver"
+if python3 .github/scripts/auto-resolve-version-conflicts.py; then
+	say "Only the recurring version-line conflict. Running mirror invariants..."
+	bash .github/scripts/check-nemtus-mirror-invariants.sh || {
+		echo "!! invariants FAILED after auto-resolution; reconcile before pushing."
+		exit 1
+	}
+	cat <<EOF
+
+Version line auto-resolved and staged; review it, then:
+  git diff --cached                                           # check the resolved version line
+  git commit --no-edit
+  git push -u origin ${SYNC_BRANCH}
+  gh pr create --repo nemtus/symbol-product --base ${LOCAL_BRANCH} --head ${SYNC_BRANCH} \\
+    --title 'Sync upstream symbol/product:${UPSTREAM_BRANCH}@${UPSTREAM_SHA}'
+  # merge the PR with a MERGE COMMIT (not squash).
+EOF
+	exit 0
+fi
+
 CONFLICTS="$(git diff --name-only --diff-filter=U | sort)"
-say "CONFLICT while merging upstream@${UPSTREAM_SHA}. Files:"
+say "Not auto-resolvable. Remaining conflicting files:"
 printf '%s\n' "${CONFLICTS}"
 
 say "conflict hunks (git diff):"

@@ -4,7 +4,11 @@ name: Mirror sync (upstream symbol/product)
 # mirror regenerable by a patch), this repo carries real code edits (the NEMTUS mirror layer),
 # so upstream arrives via a git MERGE:
 #   - clean merge  -> push a sync branch and open a PR (merge with a MERGE COMMIT, not squash)
-#   - conflict     -> abort, write the conflict list + resolution steps to the job summary, and
+#   - conflict confined to the `version` line of a mirrored packaging file (which is what an upstream
+#     version bump always produces, since `name` and `version` are adjacent there) -> resolved by
+#     .github/scripts/auto-resolve-version-conflicts.py, then same as a clean merge, with the
+#     resolution spelled out in the PR body
+#   - any other conflict -> abort, write the conflict list + resolution steps to the job summary, and
 #     fail the run (Issues are disabled on this fork; the red run + Discord notify is the signal)
 # The ci.yml `parity` job re-checks the mirror invariants before any sync PR can merge.
 # Note: the `_symbol` submodule (linters/build-ci) fetches from the NEMTUS mirror nemtus/symbol (not
@@ -74,43 +78,26 @@ jobs:
           SYNC_BRANCH="sync/upstream-${UPSTREAM_SHA}"
           git checkout -b "$SYNC_BRANCH"
 
+          AUTO_RESOLVED=''
+          AUTO_RESOLVE_LOG="${RUNNER_TEMP}/auto-resolve.log"
+
           if git merge --no-edit --no-ff "upstream/$UPSTREAM_BRANCH"; then
-            # clean merge — always publish the merge commit (it records the upstream parent so the
-            # next run's `merge-base --is-ancestor` fast-path becomes true). Do NOT skip on a
-            # tree-identical merge: that would drop the parent link and replay the same range forever.
-            # Plain --force (not --force-with-lease): on a re-run the sync branch can already exist on
-            # origin while this runner never fetched it (checkout pulls only `dev`), so there is no
-            # lease ref to compare and --force-with-lease would fail. The branch is automation-owned.
-            git push -u --force origin "$SYNC_BRANCH"
-
-            if [ -n "$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[].number')" ]; then
-              echo "PR already open for $SYNC_BRANCH."
-              exit 0
-            fi
-
-            BODY="$(printf '%s\n' \
-              "Automated mirror sync. Merges upstream \`symbol/product:${UPSTREAM_BRANCH}\`@\`${UPSTREAM_SHA}\` into \`${LOCAL_BRANCH}\`." \
-              "" \
-              "**Merge this PR with a MERGE COMMIT (not squash).** Squashing drops the upstream parent, which would make every future sync replay all of upstream history as one giant diff." \
-              "" \
-              "The \`parity\` CI job re-checks the NEMTUS mirror invariants (\`.github/scripts/check-nemtus-mirror-invariants.sh\`). Ensure it is green before merging — if upstream touched a mirrored file, reconcile so the invariants still hold. See \`docs/nemtus-mirror.md\`.")"
-
-            gh pr create \
-              --base "$LOCAL_BRANCH" \
-              --head "$SYNC_BRANCH" \
-              --title "Sync upstream symbol/product:${UPSTREAM_BRANCH}@${UPSTREAM_SHA}" \
-              --body "$BODY"
-
-            # Decorative label, best-effort: attach it after creation, non-fatally. PR creation must
-            # not depend on the label existing (this is an Issues-disabled fork where the workflow's
-            # own token cannot create labels; `gh pr create --label` would validate up front and abort
-            # the whole run if the label were absent).
-            gh pr edit "$SYNC_BRANCH" --add-label upstream-sync || true
+            echo "Clean merge of upstream@${UPSTREAM_SHA}."
+          elif python3 .github/scripts/auto-resolve-version-conflicts.py 2>&1 | tee "$AUTO_RESOLVE_LOG"; then
+            # The mirror renames the packages, and in both packaging files the `name` and `version`
+            # lines are adjacent — so every upstream version bump conflicts with the NEMTUS rename
+            # even though the resolution is purely mechanical. The script resolves ONLY that version
+            # line (it masks the version, retries the three-way merge, then fills in the higher of
+            # the two versions) and stages the result; it exits nonzero for anything else, which
+            # falls through to the manual path below. See its docstring and docs/nemtus-mirror.md.
+            git commit --no-edit
+            AUTO_RESOLVED="$(cat "$(git rev-parse --git-path NEMTUS_AUTO_RESOLUTIONS)")"
+            echo "Auto-resolved the recurring version-line conflict(s) in upstream@${UPSTREAM_SHA}."
           else
-            # conflict: do not auto-resolve code. This repo is an Issues-disabled fork, so we cannot
-            # file a tracking issue. Instead write the conflicting files + resolution steps to the job
-            # summary and fail the run — the red run (with this summary) is the signal to resolve the
-            # merge manually. Nothing here depends on Issues or labels.
+            # conflict beyond the known version line: do not auto-resolve code. This repo is an
+            # Issues-disabled fork, so we cannot file a tracking issue. Instead write the conflicting
+            # files + resolution steps to the job summary and fail the run — the red run (with this
+            # summary) is the signal to resolve the merge manually. Nothing depends on Issues or labels.
             CONFLICTS="$(git diff --name-only --diff-filter=U | sort)"
             # Capture the actual conflict hunks (combined diff, with markers) BEFORE aborting — after
             # `git merge --abort` they are gone. Cap the size so a large conflict can't blow the 1 MiB
@@ -127,6 +114,13 @@ jobs:
               echo '```'
               echo "${CONFLICTS}"
               echo '```'
+              echo
+              echo "The version-line auto-resolver ran first and could not finish the merge; its log:"
+              echo '```'
+              cat "$AUTO_RESOLVE_LOG"
+              echo '```'
+              echo "(Files it reports as auto-resolved still need review — the merge was aborted, so"
+              echo "nothing it did was kept.)"
               echo
               echo "### Conflict hunks"
               echo '```diff'
@@ -157,6 +151,51 @@ jobs:
             echo "::error::Upstream sync conflict with symbol/product@${UPSTREAM_SHA}; see the job summary for the conflicting files and resolution steps."
             exit 1
           fi
+
+          # Merged (cleanly or with the version line auto-resolved) — always publish the merge commit
+          # (it records the upstream parent so the next run's `merge-base --is-ancestor` fast-path
+          # becomes true). Do NOT skip on a tree-identical merge: that would drop the parent link and
+          # replay the same range forever.
+          # Plain --force (not --force-with-lease): on a re-run the sync branch can already exist on
+          # origin while this runner never fetched it (checkout pulls only `dev`), so there is no
+          # lease ref to compare and --force-with-lease would fail. The branch is automation-owned.
+          git push -u --force origin "$SYNC_BRANCH"
+
+          if [ -n "$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[].number')" ]; then
+            echo "PR already open for $SYNC_BRANCH."
+            exit 0
+          fi
+
+          BODY="$(printf '%s\n' \
+            "Automated mirror sync. Merges upstream \`symbol/product:${UPSTREAM_BRANCH}\`@\`${UPSTREAM_SHA}\` into \`${LOCAL_BRANCH}\`." \
+            "" \
+            "**Merge this PR with a MERGE COMMIT (not squash).** Squashing drops the upstream parent, which would make every future sync replay all of upstream history as one giant diff." \
+            "" \
+            "The \`parity\` CI job re-checks the NEMTUS mirror invariants (\`.github/scripts/check-nemtus-mirror-invariants.sh\`). Ensure it is green before merging — if upstream touched a mirrored file, reconcile so the invariants still hold. See \`docs/nemtus-mirror.md\`.")"
+
+          if [ -n "$AUTO_RESOLVED" ]; then
+            BODY="$(printf '%s\n' \
+              "$BODY" \
+              "" \
+              "### Auto-resolved version conflict" \
+              "The \`name\`/\`version\` lines of the mirrored packaging files conflict on every upstream version bump. \`.github/scripts/auto-resolve-version-conflicts.py\` resolved the version line only:" \
+              '```' \
+              "$AUTO_RESOLVED" \
+              '```' \
+              "Everything else in those files came from the normal three-way merge. **Check the resulting version lines before merging** — they decide what the next release publishes to PyPI.")"
+          fi
+
+          gh pr create \
+            --base "$LOCAL_BRANCH" \
+            --head "$SYNC_BRANCH" \
+            --title "Sync upstream symbol/product:${UPSTREAM_BRANCH}@${UPSTREAM_SHA}" \
+            --body "$BODY"
+
+          # Decorative label, best-effort: attach it after creation, non-fatally. PR creation must
+          # not depend on the label existing (this is an Issues-disabled fork where the workflow's
+          # own token cannot create labels; `gh pr create --label` would validate up front and abort
+          # the whole run if the label were absent).
+          gh pr edit "$SYNC_BRANCH" --add-label upstream-sync || true
 
   # Reset GitHub's 60-day scheduled-workflow auto-disable clock. Covers every
   # scheduled workflow in this repo — including the upstream-derived
