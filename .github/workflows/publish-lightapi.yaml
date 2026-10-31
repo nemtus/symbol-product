@@ -15,6 +15,11 @@ name: Publish nemtus-symbol-lightapi
     tags: ['nemtus-symbol-lightapi@*']
   workflow_dispatch: {}
 
+env:
+  # Published distribution name; also the tag prefix (`<PYPI_NAME>@<version>`) and the
+  # coordinate the Release job groups by.
+  PYPI_NAME: nemtus-symbol-lightapi
+
 jobs:
   build-and-publish:
     name: Build and publish to PyPI
@@ -34,6 +39,20 @@ jobs:
         with:
           python-version: '3.x'
 
+      # Publishing is tag-triggered, so the tag name is the release coordinate: it names the
+      # version on PyPI and in the GitHub Release below. If it disagrees with the tree (tag
+      # pushed from the wrong commit), both would claim a version that was never built.
+      - name: Check the tag matches the package version
+        if: github.ref_type == 'tag'
+        run: |
+          tag_version="${GITHUB_REF_NAME#"${PYPI_NAME}@"}"
+          file_version="$(sed -n 's/^version = //p' lightapi/python/setup.cfg | head -n1)"
+          if [ "${tag_version}" != "${file_version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} says ${tag_version}, but lightapi/python/setup.cfg has ${file_version}"
+            exit 1
+          fi
+          echo "tag and setup.cfg agree on ${file_version}."
+
       - name: Build sdist
         working-directory: lightapi/python
         run: |
@@ -44,3 +63,56 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
         with:
           packages-dir: lightapi/python/dist
+
+  # Record-keeping GitHub Release for the version just published, with GitHub's
+  # auto-generated notes (the same content as the web "Generate release notes" button)
+  # scoped to the previous release OF THIS PACKAGE. Mirrors the `tag` job in
+  # nemtus/symbol's publish workflows; here the tag already exists (it is what triggered
+  # the run), so this only creates the Release for it.
+  #
+  # SECURITY: `contents: write` is isolated to THIS job, which runs no build and no
+  # third-party code — only the `gh` CLI against the GitHub API. There is deliberately no
+  # checkout step, so nothing from the repo tree executes here either. The publish job
+  # above stays at `contents: read`, so a supply-chain compromise in the build cannot
+  # reach this write token.
+  release:
+    needs: build-and-publish   # runs only if the publish succeeded
+    if: github.ref_type == 'tag'   # a manual workflow_dispatch has no tag to release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub Release for the published tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#"${PYPI_NAME}@"}"
+
+          # Idempotent: re-publishing an existing tag must not fail the run.
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "release ${TAG} already exists; nothing to do."
+            exit 0
+          fi
+
+          # Previous release of this package only — the two packages share the repo and are
+          # released independently, so the newest release overall is often the other one.
+          prev="$(gh release list --repo "${GITHUB_REPOSITORY}" -L 200 --json tagName -q '.[].tagName' \
+            | grep -F "${PYPI_NAME}@" | grep -vxF "${TAG}" | head -n1 || true)"
+          echo "previous ${PYPI_NAME} release: ${prev:-<none>}"
+
+          provenance="NEMTUS mirror of upstream [symbol/product](https://github.com/symbol/product). Published [\`${PYPI_NAME}\` ${version}](https://pypi.org/project/${PYPI_NAME}/${version}/) to PyPI (import module: \`symbollightapi\`, unchanged from upstream)."
+          if notes="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="${TAG}" -f target_commitish="${GITHUB_SHA}" \
+              ${prev:+-f previous_tag_name="${prev}"} -q '.body' 2>/dev/null)" && [ -n "${notes}" ]; then
+            body="$(printf '%s\n\n%s\n' "${provenance}" "${notes}")"
+          else
+            echo "note: could not generate release notes; publishing the provenance line only."
+            body="${provenance}"
+          fi
+
+          gh release create "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${PYPI_NAME} v${version} · PyPI" \
+            --notes "${body}"
