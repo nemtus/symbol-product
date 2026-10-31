@@ -87,6 +87,13 @@ const emptyPage = {
 
 const nemSafeChainStatus = { height: blockWithTransactions.height + config.PUBLIC_NEM_BLOCKCHAIN_UNWIND_LIMIT + 1 };
 
+// Symbol specific constants
+
+const symbolFinalizedChainStatus = {
+	height: blockWithTransactions.height,
+	finalizedHeight: blockWithTransactions.height
+};
+
 // Tests
 
 describe('BlockInfo', () => {
@@ -95,7 +102,7 @@ describe('BlockInfo', () => {
 
 		const getServerSidePropsCases = [
 			{
-				description: 'returns the block info',
+				description: 'returns the block info props',
 				config: {
 					responses: { blockInfo: blockWithTransactions }
 				},
@@ -153,7 +160,7 @@ describe('BlockInfo', () => {
 					}
 				},
 				{
-					description: 'renders the created status for a recent block',
+					description: 'renders the created status when the block is recent',
 					config: { blockInfo: blockWithTransactions },
 					expected: {
 						texts: [SCREEN_TEXT.labelCreated],
@@ -161,7 +168,7 @@ describe('BlockInfo', () => {
 					}
 				},
 				{
-					description: 'renders the safe status for a block buried deeper than the unwind limit',
+					description: 'renders the safe status when the block is buried deeper than the unwind limit',
 					variants: ['nem'],
 					config: {
 						blockInfo: blockWithTransactions,
@@ -173,13 +180,11 @@ describe('BlockInfo', () => {
 					}
 				},
 				{
-					description: 'renders the finalized status for a finalized block',
+					description: 'renders the finalized status when the block is finalized',
 					variants: ['symbol'],
 					config: {
-						blockInfo: {
-							...blockWithTransactions,
-							isFinalized: true
-						}
+						blockInfo: blockWithTransactions,
+						chainStatus: symbolFinalizedChainStatus
 					},
 					expected: {
 						texts: [SCREEN_TEXT.labelFinalized],
@@ -194,7 +199,7 @@ describe('BlockInfo', () => {
 		describe('fee treemap', () => {
 			const treemapCases = [
 				{
-					description: 'renders the chart when the block transactions fit the cap',
+					description: 'renders the chart when the transaction count is not exceeding the limit',
 					config: { blockInfo: blockWithTransactions },
 					expected: {
 						texts: [SCREEN_TEXT.fieldTransactionFees],
@@ -215,7 +220,7 @@ describe('BlockInfo', () => {
 					}
 				},
 				{
-					description: 'renders the too many transactions message for a block above the cap',
+					description: 'renders the too many transactions message when the transaction count is exceeding the limit',
 					config: {
 						blockInfo: {
 							...blockWithTransactions,
@@ -257,12 +262,12 @@ describe('BlockInfo', () => {
 
 			const treemapRequestCases = [
 				{
-					description: 'requests the treemap transactions for a block at the cap',
+					description: 'requests the treemap transactions when the block is at the cap',
 					config: { transactionCount: MAX_TRANSACTION_SQUARES },
 					expected: { isTreemapRequested: true }
 				},
 				{
-					description: 'does not request the treemap transactions for a block above the cap',
+					description: 'does not request the treemap transactions when the block is above the cap',
 					config: { transactionCount: MAX_TRANSACTION_SQUARES + 1 },
 					expected: { isTreemapRequested: false }
 				}
@@ -321,7 +326,7 @@ describe('BlockInfo', () => {
 
 			runRenderScenarioTests({ renderPage, cases: transactionsCases });
 
-			runTableErrorTest('shows the try-again action when the transaction request fails', {
+			runTableErrorTest('renders the try-again action when the transaction request fails', {
 				renderPage: renderBlockInfo,
 				request: [TransactionService, 'fetchTransactionPage']
 			});

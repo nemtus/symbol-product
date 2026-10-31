@@ -1,10 +1,6 @@
 from decimal import Decimal
 
 
-def format_timestamp(timestamp):
-	return timestamp.strftime('%Y-%m-%dT%H:%M:%SZ')
-
-
 def to_hex_or_none(value):
 	return value.hex().upper() if value else None
 
