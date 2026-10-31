@@ -132,4 +132,14 @@ git tag nemtus-symbol-lightapi@<lightapi-version>   && git push origin nemtus-sy
 git tag nemtus-symbol-shoestring@<shoestring-version> && git push origin nemtus-symbol-shoestring@<shoestring-version>
 # e.g. nemtus-symbol-shoestring@0.2.4
 ```
+
+When upstream has not changed a package's version but the NEMTUS mirror needs a re-release (a packaging
+fix, for example), append a PEP 440 post-release segment — `0.2.4` → `0.2.4.post1` → `0.2.4.post2` — so
+the next upstream bump still sorts above it. PyPI never allows re-uploading a version that already exists.
+
+`publish-shoestring.yaml` compiles the gettext catalogs (`pybabel compile`) before building, because the
+`.mo` files shipped in the package are generated and gitignored; it then fails the run if the built
+artifacts do not contain one catalog per language. Do not remove either step: without them the artifacts
+carry only `.po` sources and shoestring aborts on startup with `FileNotFoundError: No translation file
+found for domain: 'messages'` (the defect in the published `0.2.4` and `0.2.4.post1`).
 <!-- /nemtus-mirror-notice -->
