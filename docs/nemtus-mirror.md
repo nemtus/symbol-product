@@ -185,6 +185,25 @@ git tag nemtus-symbol-shoestring@<shoestring-version> && git push origin nemtus-
 # e.g. nemtus-symbol-shoestring@0.2.4
 ```
 
+The tag is the release coordinate, so each workflow first checks that the version in the tag matches the
+version in the tree (`setup.cfg` / `pyproject.toml`) and fails before building if they disagree — a tag
+pushed from the wrong commit cannot publish a version that was never built.
+
+After a successful publish, a separate `release` job creates the **GitHub Release** for that tag
+(matching `nemtus/symbol`, which does the same in its publish workflows): title
+`<package> v<version> · PyPI`, body = a mirror-provenance line plus GitHub's auto-generated notes, scoped
+to the previous release *of that package* (the two packages are released independently, so the newest
+release in the repo is often the other one). It is idempotent — re-running a publish for an existing tag
+leaves the Release alone. `contents: write` is confined to that job, which has no checkout and runs only
+the `gh` CLI, so the build job keeps `contents: read`.
+
+Releases are created only for tag-triggered runs; a manual `workflow_dispatch` has no tag and skips the
+job. To add a Release for a version published before this automation existed:
+
+```bash
+gh release create nemtus-symbol-lightapi@0.0.13 --title 'nemtus-symbol-lightapi v0.0.13 · PyPI' --generate-notes
+```
+
 When upstream has not changed a package's version but the NEMTUS mirror needs a re-release (a packaging
 fix, for example), append a PEP 440 post-release segment — `0.2.4` → `0.2.4.post1` → `0.2.4.post2` — so
 the next upstream bump still sorts above it. PyPI never allows re-uploading a version that already exists.
