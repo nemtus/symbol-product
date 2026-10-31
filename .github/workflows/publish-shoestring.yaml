@@ -29,11 +29,58 @@ jobs:
         with:
           python-version: '3.x'
 
+      # The gettext catalogs shipped in the package are the COMPILED `.mo` files, which are
+      # generated (`.gitignore` has `*.mo`) and therefore absent from a fresh checkout.
+      # `pyproject.toml` ships them via `include = ['shoestring/lang/*/LC_MESSAGES/messages.mo']`,
+      # but an `include` only packages files that exist at build time. Without this step the
+      # artifacts carry just the `.po` sources and every `shoestring` invocation dies in
+      # `shoestring/__main__.py` — it calls `gettext.translation(...)` with no `fallback`, so a
+      # missing catalog raises `FileNotFoundError: No translation file found for domain:
+      # 'messages'`. (This is what shipped in 0.2.4 / 0.2.4.post1.)
+      # Only `compile` is run, never `scripts/ci/build.sh`: that also runs `extract`, which would
+      # regenerate the `.pot`/`.po` from source and could change the strings being released.
+      - name: Compile translation catalogs (.mo)
+        working-directory: tools/shoestring
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r dev_requirements.txt  # Babel (pybabel)
+          bash scripts/compile_resource_strings.sh
+
       - name: Build sdist and wheel
         working-directory: tools/shoestring
         run: |
-          python -m pip install --upgrade pip build
+          python -m pip install --upgrade build
           python -m build
+
+      # Guard: never publish a package that cannot start. `python -m build` builds the wheel from
+      # the sdist, so both artifacts must carry a catalog for every language directory in the tree.
+      - name: Verify artifacts contain the compiled catalogs
+        working-directory: tools/shoestring
+        run: |
+          python - <<'PY'
+          import pathlib, sys, tarfile, zipfile
+
+          expected = sorted(p.name for p in pathlib.Path('shoestring/lang').iterdir() if p.is_dir())
+          if not expected:
+              sys.exit('no language directories found under shoestring/lang')
+
+          failures = []
+          for artifact in sorted(pathlib.Path('dist').iterdir()):
+              if artifact.name.endswith('.whl'):
+                  names = zipfile.ZipFile(artifact).namelist()
+              elif artifact.name.endswith('.tar.gz'):
+                  names = tarfile.open(artifact).getnames()
+              else:
+                  continue
+
+              found = sorted(n.split('shoestring/lang/')[1].split('/')[0] for n in names if n.endswith('.mo'))
+              print(f'{artifact.name}: {found or "NO .mo FILES"}')
+              if found != expected:
+                  failures.append(f'{artifact.name}: expected {expected}, found {found}')
+
+          if failures:
+              sys.exit('compiled translation catalogs missing from artifacts:\n  ' + '\n  '.join(failures))
+          PY
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
