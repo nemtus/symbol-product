@@ -4,22 +4,23 @@ name: CI
 # Runs the components' tests/builds and the mirror-invariant parity check before merge.
 # Uses only first-party actions (SHA-pinned) + shell, so it runs even under a restrictive
 # "allowed actions" policy. Other monorepo components remain on upstream Jenkins (out of scope).
+#
+# Deliberately NOT path-filtered, for two reasons:
+#   - the `dev` ruleset makes all three jobs below REQUIRED status checks. A path-filtered workflow
+#     simply does not run for a PR that misses the filter, so the checks never report and the PR is
+#     blocked forever — which is what happened to every upstream sync PR that touched only other
+#     monorepo components (e.g. #66, explorer/rest only).
+#   - the `parity` job reads `.gitmodules` (invariant: the `_symbol` submodule must fetch from
+#     nemtus/symbol), which sits outside any plausible component filter. Under the old filter an
+#     upstream change to `.gitmodules` alone could revert that invariant with the gate never running.
+# The whole workflow costs ~50s of wall clock (4s + 32s + 48s in parallel), so running it on every
+# PR is cheaper than either problem.
 
 'on':
   pull_request:
     branches: [dev]
-    paths:
-      - 'tools/shoestring/**'
-      - 'lightapi/python/**'
-      - '.github/workflows/ci.yml'
-      - '.github/scripts/**'
   push:
     branches: [dev]
-    paths:
-      - 'tools/shoestring/**'
-      - 'lightapi/python/**'
-      - '.github/workflows/ci.yml'
-      - '.github/scripts/**'
   workflow_dispatch: {}
 
 concurrency:

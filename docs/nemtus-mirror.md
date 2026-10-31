@@ -117,9 +117,16 @@ already-initialized clone picks up the URL change on the next `init.sh` (which n
 
 ## CI
 
-- **`ci.yml`** (on PRs touching `tools/shoestring/**` or `lightapi/python/**`): runs `parity`, plus
-  `lightapi` and `shoestring` test+build jobs. It uses only first-party, SHA-pinned actions so it runs even
-  under a restrictive allowed-actions policy. The other ~14 monorepo components remain on upstream Jenkins.
+- **`ci.yml`** (every PR to `dev`, and every push to `dev`): runs `parity`, plus `lightapi` and
+  `shoestring` test+build jobs. It uses only first-party, SHA-pinned actions so it runs even under a
+  restrictive allowed-actions policy. The other ~14 monorepo components remain on upstream Jenkins.
+
+  It is intentionally **not** path-filtered. The three jobs are required status checks on `dev`, and a
+  path-filtered workflow does not run at all for a PR outside its filter — so the checks never report and
+  the PR stays blocked forever. Upstream sync PRs that touch only other monorepo components hit exactly
+  that. Separately, `parity` reads `.gitmodules`, which no component filter would cover, so a filtered
+  gate could miss an upstream change that reverts the `_symbol` submodule invariant. The full workflow is
+  ~50s of wall clock, which is cheaper than working around either problem.
 - **`codeql-analysis.yaml`**, **`combine-dependabot-pr.yaml`**, **`publish-{shoestring,lightapi}.yaml`**:
   all third-party actions are pinned to full-length commit SHAs (kept current by Dependabot's
   `github-actions` group).
@@ -133,8 +140,31 @@ Settings → **Actions → General**:
   *Allow GitHub Actions to create and approve pull requests* (needed by `combine-dependabot-pr` and
   `mirror-sync`).
 
-(Optional) Settings → **Branches** → protect `dev`: require the `ci.yml` checks (`parity`, `lightapi`,
-`shoestring`) before merge. Add them after the first CI run so the checks appear in the list.
+Settings → **Rules → Rulesets**: `dev` is protected by a ruleset (not legacy branch protection, so the
+`branches/dev/protection` API reports "not protected"). It requires the `ci.yml` checks (`Mirror
+invariants`, `lightapi (test + build)`, `shoestring (test + build)`), the CodeQL/Socket checks, and one
+approving review; it allows the `merge` merge method only, matching the merge-commit rule above.
+
+Two consequences worth knowing before you try to merge anything:
+
+- **Required status checks must be able to run for every PR.** That is why `ci.yml` is not path-filtered
+  (see the CI section) — a check that never reports blocks the PR permanently.
+- **The approval requirement cannot be satisfied by the PR author**, and in practice every PR here is
+  authored by the same maintainer, so merges go through the ruleset's admin bypass:
+
+  ```bash
+  gh pr merge <number> --repo nemtus/symbol-product --merge --admin
+  ```
+
+  Plain `gh pr merge --merge` fails with "the base branch policy prohibits the merge". `--admin` bypasses
+  the ruleset — **including the required status checks** — so check the rollup yourself before using it:
+
+  ```bash
+  gh pr view <number> --repo nemtus/symbol-product --json statusCheckRollup \
+    --jq '[.statusCheckRollup[]|"\(.name // .context)=\(.conclusion // .state)"]|join(" ")'
+  ```
+
+  Keep `--merge` — never `--squash` — for sync PRs.
 
 ## Release runbook (PyPI)
 
