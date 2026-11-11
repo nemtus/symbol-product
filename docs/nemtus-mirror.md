@@ -50,6 +50,20 @@ the shoestring/lightapi package names are the `nemtus-*` names; `PackageResolver
    - **any other conflict** → aborts the merge and **fails the run**, writing the conflicting files and
      the local resolution steps to the run's job summary. (This repo is an Issues-disabled fork, so the
      conflict is signalled by the red run + summary rather than a tracking issue.)
+4. keeps **a single open sync PR**: every sync PR contains everything the older ones did, so once the
+   current PR exists, `.github/scripts/close-superseded-sync-prs.sh` closes the older automated sync PRs
+   (with a "Superseded by #N" comment) and deletes their branches. On the fast-path (`dev` already
+   contains upstream, e.g. after a sync PR was merged by hand) it closes the leftovers as already merged.
+   Safety rules:
+   - only PRs opened by `github-actions[bot]` from a `sync/upstream-*` branch are considered;
+   - a sync branch carrying any commit not made by the bot (e.g. a hand-resolved conflict) is **never**
+     closed — nor one whose upstream commits are no longer on upstream;
+   - on the conflict path nothing is closed: the previous sync PR stays open as the best mergeable
+     candidate until the conflict is resolved.
+
+   To preview what it would close: `DRY_RUN=1 UPSTREAM_REF=upstream/dev bash
+   .github/scripts/close-superseded-sync-prs.sh <newest sync PR number>` (with the `upstream` remote
+   fetched).
 
 The sync PR is opened by `github-actions[bot]` (the built-in `GITHUB_TOKEN`), so its `ci.yml` runs start
 in an approval-required state: click **"Approve workflows to run"** in the PR merge box to run
