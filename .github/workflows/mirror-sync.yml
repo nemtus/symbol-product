@@ -78,7 +78,7 @@ jobs:
             echo "Already up to date with upstream@${UPSTREAM_SHA}; nothing to sync."
             # A sync PR may have been merged by hand while older ones are still open; they are now
             # redundant, so close them too.
-            bash .github/scripts/close-superseded-sync-prs.sh dev \
+            bash .github/scripts/close-superseded-sync-prs.sh base \
               || echo "::warning::Could not clean up superseded sync PRs; see the log above."
             exit 0
           fi

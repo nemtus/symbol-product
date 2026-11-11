@@ -2,28 +2,32 @@
 #
 # close-superseded-sync-prs.sh
 #
-# Keeps at most ONE open upstream-sync PR. Each mirror-sync run that finds new upstream commits opens
-# `sync/upstream-<sha>`, and every such PR contains everything the previous ones did — so without this,
-# stale sync PRs pile up (one per day) and only the newest is worth merging. Run by
-# .github/workflows/mirror-sync.yml after the current sync PR exists (or when `dev` already contains
-# upstream), it closes the older sync PRs and deletes their branches.
+# Keeps at most ONE open upstream-sync PR per base branch. Each mirror-sync run that finds new upstream
+# commits opens `<SYNC_PREFIX><sha>`, and every such PR contains everything the previous ones did — so
+# without this, stale sync PRs pile up (one per day) and only the newest is worth merging. Run by
+# .github/workflows/mirror-sync.yml after the current sync PR exists (or when the base branch already
+# contains upstream), it closes the older sync PRs and deletes their branches.
+#
+# The same script is shared verbatim by the NEMTUS mirrors nemtus/symbol, nemtus/symbol-product and
+# nemtus/symbol-networks; keep the copies identical.
 #
 # A PR is closed only when ALL of these hold:
-#   - it targets LOCAL_BRANCH, its head is `sync/upstream-*`, and it is not KEEP_BRANCH;
+#   - it targets LOCAL_BRANCH, its head starts with SYNC_PREFIX, and it is not KEEP_BRANCH;
 #   - it was opened by the github-actions bot;
 #   - its branch carries nothing beyond LOCAL_BRANCH + the current upstream except commits made by the
-#     github-actions bot (i.e. the automated merge commit). A sync branch a human has pushed to — e.g. a
+#     github-actions bot (i.e. the automated sync commit). A sync branch a human has pushed to — e.g. a
 #     hand-resolved conflict — is left alone, and so is one whose upstream commits are no longer on
 #     upstream (an upstream force-push), since closing it could lose work.
 #
 # Usage:
-#   close-superseded-sync-prs.sh <superseding PR number | "dev">
+#   close-superseded-sync-prs.sh <superseding PR number | base>
 #     A PR number: the stale PRs are closed as superseded by that PR (KEEP_BRANCH = its branch).
-#     "dev":       LOCAL_BRANCH already contains upstream; stale PRs are closed as already merged.
+#     "base":      LOCAL_BRANCH already contains UPSTREAM_REF; stale PRs are closed as already merged.
 #
 # Environment:
 #   LOCAL_BRANCH  (default dev)          base branch of the sync PRs
 #   UPSTREAM_REF  (default upstream/dev) local ref of the current upstream head (must be fetched)
+#   SYNC_PREFIX   (default sync/upstream-) head-branch prefix of the automated sync PRs
 #   KEEP_BRANCH   (default: empty)       sync branch that must never be closed (the current one)
 #   DRY_RUN=1                            only report what would be closed
 #   GH_REPO / GH_TOKEN                   as for any gh call (mirror-sync.yml sets both)
@@ -33,9 +37,10 @@
 
 set -euo pipefail
 
-SUPERSEDED_BY="${1:?usage: close-superseded-sync-prs.sh <superseding PR number | dev>}"
+SUPERSEDED_BY="${1:?usage: close-superseded-sync-prs.sh <superseding PR number | base>}"
 LOCAL_BRANCH="${LOCAL_BRANCH:-dev}"
 UPSTREAM_REF="${UPSTREAM_REF:-upstream/dev}"
+export SYNC_PREFIX="${SYNC_PREFIX:-sync/upstream-}"  # read by the --jq filter below
 KEEP_BRANCH="${KEEP_BRANCH:-}"
 DRY_RUN="${DRY_RUN:-}"
 BOT_EMAIL='github-actions[bot]@users.noreply.github.com'
@@ -44,10 +49,10 @@ git rev-parse --verify --quiet "${UPSTREAM_REF}^{commit}" >/dev/null \
 	|| { echo "::error::${UPSTREAM_REF} is not a local ref; fetch upstream first." >&2; exit 2; }
 git fetch --no-tags --quiet origin "+refs/heads/${LOCAL_BRANCH}:refs/remotes/origin/${LOCAL_BRANCH}"
 
-if [ "$SUPERSEDED_BY" = 'dev' ]; then
+if [ "$SUPERSEDED_BY" = 'base' ]; then
 	# Without this guard every untouched sync PR would qualify, including the newest one.
 	git merge-base --is-ancestor "$UPSTREAM_REF" "refs/remotes/origin/${LOCAL_BRANCH}" \
-		|| { echo "::error::'dev' mode requires ${LOCAL_BRANCH} to contain ${UPSTREAM_REF}." >&2; exit 2; }
+		|| { echo "::error::'base' mode requires ${LOCAL_BRANCH} to contain ${UPSTREAM_REF}." >&2; exit 2; }
 	REASON="\`${LOCAL_BRANCH}\` already contains every upstream commit this PR would merge."
 else
 	REASON="Superseded by #${SUPERSEDED_BY}, which merges a newer upstream head and contains every upstream commit this PR would merge."
@@ -59,7 +64,7 @@ fi
 CANDIDATES="$(gh pr list --base "$LOCAL_BRANCH" --state open --limit 100 \
 	--json number,headRefName,author \
 	--jq '.[]
-		| select(.headRefName | startswith("sync/upstream-"))
+		| select(.headRefName | startswith(env.SYNC_PREFIX))
 		| select(.author.is_bot and (.author.login | test("github-actions")))
 		| "\(.number) \(.headRefName)"')"
 
@@ -94,7 +99,7 @@ while read -r number branch; do
 	fi
 
 	echo "Closing #${number} (${branch}): ${REASON}"
-	gh pr comment "$number" --body "${REASON} Closing automatically to keep a single open upstream-sync PR (see \`docs/nemtus-mirror.md\`)." \
+	gh pr comment "$number" --body "${REASON} Closing automatically to keep a single open upstream-sync PR." \
 		|| echo "::warning::#${number}: could not post the closing comment."
 	gh pr close "$number" --delete-branch \
 		|| echo "::warning::#${number}: could not close the PR or delete ${branch}."
