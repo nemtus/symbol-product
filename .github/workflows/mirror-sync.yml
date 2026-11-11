@@ -10,6 +10,10 @@ name: Mirror sync (upstream symbol/product)
 #     resolution spelled out in the PR body
 #   - any other conflict -> abort, write the conflict list + resolution steps to the job summary, and
 #     fail the run (Issues are disabled on this fork; the red run + Discord notify is the signal)
+# Only ONE sync PR is kept open: once the current one exists, older automated sync PRs (each fully
+# contained in the newer one) are closed and their branches deleted by
+# .github/scripts/close-superseded-sync-prs.sh. Branches a human pushed to are never touched, and on
+# the conflict path nothing is closed (yesterday's PR is still the best mergeable candidate).
 # The ci.yml `parity` job re-checks the mirror invariants before any sync PR can merge.
 # Note: the `_symbol` submodule (linters/build-ci) fetches from the NEMTUS mirror nemtus/symbol (not
 # upstream symbol/symbol); its pointer SHA is a SEPARATE sync owned by the existing Jenkins
@@ -72,6 +76,10 @@ jobs:
           # fast-path: our branch already contains every upstream commit
           if git merge-base --is-ancestor "upstream/$UPSTREAM_BRANCH" HEAD; then
             echo "Already up to date with upstream@${UPSTREAM_SHA}; nothing to sync."
+            # A sync PR may have been merged by hand while older ones are still open; they are now
+            # redundant, so close them too.
+            bash .github/scripts/close-superseded-sync-prs.sh dev \
+              || echo "::warning::Could not clean up superseded sync PRs; see the log above."
             exit 0
           fi
 
@@ -161,8 +169,11 @@ jobs:
           # lease ref to compare and --force-with-lease would fail. The branch is automation-owned.
           git push -u --force origin "$SYNC_BRANCH"
 
-          if [ -n "$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[].number')" ]; then
-            echo "PR already open for $SYNC_BRANCH."
+          SYNC_PR="$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[].number')"
+          if [ -n "$SYNC_PR" ]; then
+            echo "PR #${SYNC_PR} already open for $SYNC_BRANCH."
+            KEEP_BRANCH="$SYNC_BRANCH" bash .github/scripts/close-superseded-sync-prs.sh "$SYNC_PR" \
+              || echo "::warning::Could not clean up superseded sync PRs; see the log above."
             exit 0
           fi
 
@@ -185,17 +196,24 @@ jobs:
               "Everything else in those files came from the normal three-way merge. **Check the resulting version lines before merging** — they decide what the next release publishes to PyPI.")"
           fi
 
-          gh pr create \
+          SYNC_PR_URL="$(gh pr create \
             --base "$LOCAL_BRANCH" \
             --head "$SYNC_BRANCH" \
             --title "Sync upstream symbol/product:${UPSTREAM_BRANCH}@${UPSTREAM_SHA}" \
-            --body "$BODY"
+            --body "$BODY")"
+          echo "Opened ${SYNC_PR_URL}"
 
           # Decorative label, best-effort: attach it after creation, non-fatally. PR creation must
           # not depend on the label existing (this is an Issues-disabled fork where the workflow's
           # own token cannot create labels; `gh pr create --label` would validate up front and abort
           # the whole run if the label were absent).
           gh pr edit "$SYNC_BRANCH" --add-label upstream-sync || true
+
+          # Keep a single open sync PR: close the older automated ones (all contained in this one).
+          # Runs only after the new PR exists, so there is never a moment with no sync PR open.
+          SYNC_PR="${SYNC_PR_URL##*/}"
+          KEEP_BRANCH="$SYNC_BRANCH" bash .github/scripts/close-superseded-sync-prs.sh "$SYNC_PR" \
+            || echo "::warning::Could not clean up superseded sync PRs; see the log above."
 
   # Reset GitHub's 60-day scheduled-workflow auto-disable clock. Covers every
   # scheduled workflow in this repo — including the upstream-derived
