@@ -93,6 +93,10 @@ jobs:
       - name: Test
         working-directory: tools/shoestring
         run: bash scripts/ci/test.sh
+      # Same dependency injection + check as publish-shoestring.yaml, so a sync PR cannot break the
+      # release path unnoticed (the publish workflow only runs on release tags).
       - name: Validate packaging
-        working-directory: tools/shoestring
-        run: python -m build
+        run: |
+          python .github/scripts/shoestring-dependencies.py inject
+          (cd tools/shoestring && python -m build)
+          python .github/scripts/shoestring-dependencies.py verify tools/shoestring/dist/*.whl

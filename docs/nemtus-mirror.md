@@ -227,4 +227,13 @@ the next upstream bump still sorts above it. PyPI never allows re-uploading a ve
 artifacts do not contain one catalog per language. Do not remove either step: without them the artifacts
 carry only `.po` sources and shoestring aborts on startup with `FileNotFoundError: No translation file
 found for domain: 'messages'` (the defect in the published `0.2.4` and `0.2.4.post1`).
+
+shoestring's runtime dependencies live **only in `tools/shoestring/requirements.txt`**. As upstream does
+(Jenkins `publish.groovy` runs `poetry add` for each requirement), `pyproject.toml` keeps just the `python`
+constraint, and `.github/scripts/shoestring-dependencies.py inject` copies `requirements.txt` into it on
+the CI checkout right before `python -m build`; `verify` then fails the run unless the wheel's
+`Requires-Dist` names exactly those packages. Both `publish-shoestring.yaml` and the `ci.yml` shoestring job
+run these steps. Do not add dependencies to `pyproject.toml` by hand: a committed copy is never bumped by
+upstream syncs or Dependabot, which is how `0.2.5` shipped stale ranges (e.g. `websockets<16.1` while
+`requirements.txt` asked for `~=16.1`; fixed in `0.2.5.post1`).
 <!-- /nemtus-mirror-notice -->
