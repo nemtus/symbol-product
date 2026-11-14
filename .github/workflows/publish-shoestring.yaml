@@ -65,11 +65,28 @@ jobs:
           python -m pip install -r dev_requirements.txt  # Babel (pybabel)
           bash scripts/compile_resource_strings.sh
 
+      # requirements.txt is the single source of truth for runtime dependencies (upstream sync PRs and
+      # Dependabot bump only that file). As upstream does at release time (`poetry add` per line in
+      # Jenkins publish.groovy), copy it into pyproject.toml on this checkout only; a committed copy
+      # drifted and shipped stale ranges in 0.2.5.
+      - name: Inject runtime dependencies from requirements.txt
+        run: python .github/scripts/shoestring-dependencies.py inject
+
       - name: Build sdist and wheel
         working-directory: tools/shoestring
         run: |
           python -m pip install --upgrade build
           python -m build
+
+      - name: Verify wheel dependencies match requirements.txt
+        run: |
+          shopt -s nullglob
+          wheels=(tools/shoestring/dist/*.whl)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one wheel in tools/shoestring/dist, found ${#wheels[@]}"
+            exit 1
+          fi
+          python .github/scripts/shoestring-dependencies.py verify "${wheels[0]}"
 
       # Guard: never publish a package that cannot start. `python -m build` builds the wheel from
       # the sdist, so both artifacts must carry a catalog for every language directory in the tree.
