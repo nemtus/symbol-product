@@ -249,6 +249,7 @@ def _expected_block_list_item(height, is_finalized, block_reward=None):
 		'beneficiaryAddress': 'TCEUGLPCMO5Y72EEISSNUKGTMCN5RO4PVYMK5FI',
 		'totalFees': float(height),
 		'totalTransactions': height + 10,
+		'topLevelTransactions': height,
 		'statementCount': height,
 		'blockReward': block_reward,
 		'isFinalized': is_finalized,
@@ -1177,7 +1178,7 @@ def test_symbol_blocks_reads_db(symbol_database_config):
 				finalized_height=2),
 			[
 				create_symbol_block(1, transactions_count=0, total_transactions_count=0),
-				create_symbol_block(2, transactions_count=2, total_transactions_count=5),
+				create_symbol_block(2, transactions_count=1, total_transactions_count=3),
 				create_symbol_block(3, transactions_count=3, total_transactions_count=3)
 			])
 		with rest_settings_env(app_config_path):
@@ -1189,8 +1190,8 @@ def test_symbol_blocks_reads_db(symbol_database_config):
 	assert 200 == response.status_code
 	assert [
 		{**_expected_block_list_item(3, is_finalized=False), 'totalTransactions': 3},
-		{**_expected_block_list_item(2, is_finalized=True), 'totalTransactions': 5},
-		{**_expected_block_list_item(1, is_finalized=True), 'totalTransactions': 0}
+		{**_expected_block_list_item(2, is_finalized=True), 'totalTransactions': 3, 'topLevelTransactions': 1},
+		{**_expected_block_list_item(1, is_finalized=True), 'totalTransactions': 0, 'topLevelTransactions': 0}
 	] == response.json
 
 
@@ -1944,14 +1945,18 @@ def test_symbol_block_reads_db(symbol_database_config):
 		_seed_symbol_block_tables(
 			symbol_database_config,
 			create_symbol_sync_state(last_synced_height=2, finalized_height=2),
-			[create_symbol_block(2, transactions_count=2, total_transactions_count=5)])
+			[create_symbol_block(2, transactions_count=1, total_transactions_count=3)])
 		with rest_settings_env(app_config_path):
 			# Act:
 			response = _create_symbol_app().test_client().get('/api/symbol/block/2')
 
 	# Assert:
 	assert 200 == response.status_code
-	assert {**_expected_block_detail(2, is_finalized=True), 'totalTransactions': 5} == response.json
+	assert {
+		**_expected_block_detail(2, is_finalized=True),
+		'totalTransactions': 3,
+		'topLevelTransactions': 1
+	} == response.json
 
 
 def test_block_stats_http_formats_rows(symbol_database_config):
@@ -3496,22 +3501,26 @@ def test_list_window_date_boundary(extra_days):
 def _snapshot_http_expected_responses():
 	# These values describe the two explicit create_account_list_entries fixture variants.
 	old_statistics = {
-		'total': 4, 'harvesting': 0, 'eligibleForHarvesting': 4,
-		'top10AccountsImportance': 100.0, 'harvestingAccountsPercentage': 0.0,
+		'total': 4,
+		'harvestedAccounts': 0,
+		'eligibleHarvestAccounts': 4,
+		'top10AccountsImportance': 100.0,
+		'harvestingAccountsPercentage': 0.0,
 		'importanceBreakdown': [
 			[40.0, str(Address(account_address(1)))], [30.0, str(Address(account_address(3)))],
 			[20.0, str(Address(account_address(4)))], [10.0, str(Address(account_address(2)))]],
-		'harvestingAccountsChart': [[0.0, 'Harvesting'], [100.0, 'Not harvesting']],
-		'pendingVerification': []
+		'harvestingAccountsChart': [[0.0, 'Harvesting'], [100.0, 'Not harvesting']]
 	}
 	new_statistics = {
-		'total': 4, 'harvesting': 0, 'eligibleForHarvesting': 4,
-		'top10AccountsImportance': 100.0, 'harvestingAccountsPercentage': 0.0,
+		'total': 4,
+		'harvestedAccounts': 0,
+		'eligibleHarvestAccounts': 4,
+		'top10AccountsImportance': 100.0,
+		'harvestingAccountsPercentage': 0.0,
 		'importanceBreakdown': [
 			[40.0, str(Address(account_address(2)))], [30.0, str(Address(account_address(4)))],
 			[20.0, str(Address(account_address(3)))], [10.0, str(Address(account_address(1)))]],
-		'harvestingAccountsChart': [[0.0, 'Harvesting'], [100.0, 'Not harvesting']],
-		'pendingVerification': []
+		'harvestingAccountsChart': [[0.0, 'Harvesting'], [100.0, 'Not harvesting']]
 	}
 	new_accounts = [
 		_expected_list_item(4, '0E' * 32, 'main', .3, 0, 3, 0),
