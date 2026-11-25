@@ -21,6 +21,11 @@ export const requiredConfigs = [
 		exportName: 'addressBookWidgetConfig', 
 		typeName: 'AddressBookWidgetConfig' 
 	},
+	{
+		path: 'config/assets-screen-config',
+		exportName: 'assetsScreenConfig',
+		typeName: 'AssetsScreenConfig'
+	},
 	{ 
 		path: 'config/button-config', 
 		exportName: 'buttonConfig', 
@@ -64,7 +69,12 @@ export const requiredConfigs = [
 	{ 
 		path: 'config/send-receive-buttons-config', 
 		exportName: 'sendReceiveButtonsConfig', 
-		typeName: 'SendReceiveButtonsConfig' 
+		typeName: 'SendReceiveButtonsConfig'
+	},
+	{
+		path: 'config/settings-network-screen-config',
+		exportName: 'settingsNetworkScreenConfig',
+		typeName: 'SettingsNetworkScreenConfig'
 	},
 	{ 
 		path: 'config/status-card-config', 
