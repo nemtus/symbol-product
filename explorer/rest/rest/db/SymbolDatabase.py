@@ -14,18 +14,20 @@ from rest.model.symbol.Block import BLOCK_STATISTICS_WINDOW, SymbolBlockView
 from rest.model.symbol.Mosaic import SymbolMosaicView
 from rest.model.symbol.MosaicRestriction import MosaicRestrictionEntryType
 from rest.model.symbol.Namespace import SymbolNamespaceView
-from rest.model.symbol.TransactionView import AGGREGATE_TYPES, SymbolTransactionView, create_unconfirmed_record
+from rest.model.symbol.TransactionView import (
+	AGGREGATE_TYPES,
+	TransactionMosaicRecord,
+	create_confirmed_record,
+	create_unconfirmed_record,
+	resolve_transaction_mosaics
+)
 from rest.model.symbol.validation import SymbolDataInvalid
 
 from .DatabaseConnection import DatabaseConnectionPool
-from .SymbolDatabaseCommon import (
-	SymbolDataUnavailable,
-	TransactionMosaicRecord,
-	bytes_or_none,
-	is_non_public_state,
-	try_get_readable_height
-)
+from .SymbolDatabaseCommon import SymbolDataUnavailable, bytes_or_none, is_non_public_state, try_get_readable_height
 from .SymbolTransactionDetail import SymbolTransactionDetailMixin
+
+AGGREGATE_TYPE_IDS = tuple(transaction_type.value for transaction_type in AGGREGATE_TYPES)
 
 BLOCK_COLUMNS = '''
 	height,
@@ -54,7 +56,8 @@ BLOCK_COLUMNS = '''
 	harvesting_eligible_accounts_count,
 	total_voting_balance,
 	previous_importance_block_hash,
-	block_reward
+	block_reward,
+	transactions_count
 '''
 
 MOSAIC_COLUMNS = '''
@@ -71,6 +74,26 @@ MOSAIC_COLUMNS = '''
 	revokable,
 	alias_names
 '''
+
+TRANSACTION_COLUMNS = ', '.join(f'transactions.{column}' for column in (
+	'id',
+	'hash',
+	'is_embedded',
+	'aggregate_hash',
+	'embedded_index',
+	'height',
+	'type',
+	'signer_address',
+	'recipient_address',
+	'effective_fee',
+	'timestamp',
+	'message_type',
+	'message_payload',
+	'deadline',
+	'size',
+	'body',
+))
+
 SYMBOL_ID_PATTERN = re.compile(r'[0-9A-Fa-f]{16}', re.ASCII)
 
 SYNC_STATE_COLUMNS = [
@@ -124,8 +147,8 @@ class SortOrder(str, Enum):
 TransactionQuery = namedtuple(
 	'TransactionQuery',
 	['limit', 'offset', 'height', 'transaction_types', 'address', 'signer_public_key', 'recipient_address',
-		'transfer_mosaic_id', 'include_embedded', 'sender_address'],
-	defaults=(10, 0, None, (), None, None, None, None, False, None))
+		'transfer_mosaic_id', 'sender_address'],
+	defaults=(10, 0, None, (), None, None, None, None, None))
 TransactionStatisticsRecord = namedtuple(
 	'TransactionStatisticsRecord', ['total', 'last30_day', 'last24_hours', 'average_per_block'])
 TransactionRangeRecord = namedtuple('TransactionRangeRecord', ['period', 'total_transactions'])
@@ -140,10 +163,7 @@ MosaicRestrictionRecord = namedtuple(
 	'MosaicRestrictionRecord', ['composite_hash', 'mosaic_id', 'entry_type', 'target_address', 'restrictions'])
 NamespaceMosaicGroupRecord = namedtuple('NamespaceMosaicGroupRecord', ['namespace_id', 'namespace_name', 'data'])
 NamespaceDetailRecord = namedtuple('NamespaceDetailRecord', ['namespace', 'sub_namespaces', 'namespace_mosaics'])
-TransactionRecord = namedtuple(
-	'TransactionRecord',
-	['transaction_id', 'hash', 'is_embedded', 'aggregate_hash', 'embedded_index', 'height', 'transaction_type',
-		'signer_address', 'recipient_address', 'effective_fee', 'timestamp', 'message_type', 'message_payload', 'mosaics'])
+NamespaceHierarchy = namedtuple('NamespaceHierarchy', ['levels', 'root_name'])
 BlockStatisticsRecord = namedtuple('BlockStatisticsRecord', ['height', 'timestamp', 'total_fee', 'difficulty'])
 AccountRecord = namedtuple(
 	'AccountRecord',
@@ -355,7 +375,7 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 
 		return False
 
-	def get_transactions(self, query):
+	def get_transactions(self, query):  # pylint: disable=too-many-locals
 		"""Gets a confirmed transaction page and its display relations from one database snapshot."""
 
 		with self.connection() as connection:
@@ -371,7 +391,29 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 				if not transaction_rows:
 					return []
 
-				return self._fetch_transaction_records(cursor, transaction_rows, sync_state)
+				aggregate_hashes = [bytes(row[1]) for row in transaction_rows if not row[2] and row[6] in AGGREGATE_TYPE_IDS]
+				embedded_transaction_rows = self._fetch_embedded_transactions(cursor, aggregate_hashes)
+
+				all_rows_by_id_map = {row[0]: row for row in (*transaction_rows, *embedded_transaction_rows)}
+				mosaics_by_transaction_map = self._fetch_transaction_mosaics(
+					cursor, list(all_rows_by_id_map), sync_state)
+				records_by_id_map = {
+					row[0]: create_confirmed_record(row, tuple(mosaics_by_transaction_map[row[0]]), self.native_mosaic_info)
+					for row in all_rows_by_id_map.values()
+				}
+
+				embedded_transactions_by_hash_map = {}
+				for row in embedded_transaction_rows:
+					record = records_by_id_map[row[0]]
+					embedded_transactions_by_hash_map.setdefault(record.aggregate_hash, []).append(record)
+
+				transactions = []
+				for row in transaction_rows:
+					record = records_by_id_map[row[0]]
+					embedded_records = embedded_transactions_by_hash_map.get(record.transaction_hash)
+					transactions.append(record._replace(embedded_transactions=tuple(embedded_records)) if embedded_records else record)
+
+				return transactions
 
 	def get_transaction_statistics(self, cache=None):
 		"""Gets statistics, validating publication before cache lookup in the aggregation snapshot."""
@@ -964,20 +1006,7 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 		where_clauses, parameters = SymbolDatabase._create_transaction_filter(query)
 		cursor.execute(
 			f'''
-			SELECT
-				transactions.id,
-				transactions.hash,
-				transactions.is_embedded,
-				transactions.aggregate_hash,
-				transactions.embedded_index,
-				transactions.height,
-				transactions.type,
-				transactions.signer_address,
-				transactions.recipient_address,
-				transactions.effective_fee,
-				transactions.timestamp,
-				transactions.message_type,
-				transactions.message_payload
+			SELECT {TRANSACTION_COLUMNS}
 			FROM symbol_transactions AS transactions
 			JOIN symbol_sync_state AS sync_state ON sync_state.id = 1
 			WHERE {' AND '.join(where_clauses)}
@@ -993,8 +1022,24 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 		return transaction_rows
 
 	@staticmethod
+	def _fetch_embedded_transactions(cursor, aggregate_hashes):
+		"""Loads aggregate children after page selection, without page filters."""
+
+		if not aggregate_hashes:
+			return []
+
+		cursor.execute(
+			f'''SELECT {TRANSACTION_COLUMNS}
+			FROM symbol_transactions AS transactions
+			WHERE aggregate_hash = ANY(%s::bytea[]) AND transactions.is_embedded = true
+			ORDER BY aggregate_hash, embedded_index''',
+			(aggregate_hashes,))
+
+		return cursor.fetchall()
+
+	@staticmethod
 	def _create_transaction_filter(query):
-		where_clauses = ['transactions.height <= sync_state.last_synced_height']
+		where_clauses = ['transactions.height <= sync_state.last_synced_height', 'transactions.is_embedded = false']
 		parameters = []
 		filters = [
 			(query.height, 'transactions.height = %s'),
@@ -1019,37 +1064,52 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 			where_clauses.append('transactions.type = ANY(%s::integer[])')
 			parameters.append(list(query.transaction_types))
 
-		if not query.include_embedded:
-			where_clauses.append('transactions.is_embedded = false')
-
 		return where_clauses, parameters
 
-	def _fetch_transaction_records(self, cursor, transaction_rows, sync_state):
-		transaction_ids = [row[0] for row in transaction_rows]
+	def _fetch_transaction_mosaics(self, cursor, transaction_ids, sync_state):
+		"""Loads confirmed transfer amounts and display metadata in one snapshot query."""
+
+		# Native-only reads during repair use configuration without depending on current mosaic state.
+		is_metadata_unsafe = is_non_public_state(sync_state)
+		divisibility_column = 'NULL' if is_metadata_unsafe else 'm.divisibility'
+		alias_name_column = 'NULL' if is_metadata_unsafe else 'm.alias_names->>0'
+		mosaic_join = '' if is_metadata_unsafe else 'LEFT JOIN symbol_mosaics AS m ON m.mosaic_id = tm.mosaic_id'
 		cursor.execute(
-			'''
-			SELECT transaction_id, mosaic_id, amount, role, position
-			FROM symbol_transaction_mosaics
-			WHERE transaction_id = ANY(%s::bigint[])
-				AND role <> 'metadata_target'::symbol_transaction_mosaic_role
-			ORDER BY transaction_id, position
+			f'''
+			SELECT
+				tm.transaction_id,
+				tm.mosaic_id,
+				tm.amount,
+				tm.role,
+				tm.position,
+				{divisibility_column},
+				{alias_name_column}
+			FROM symbol_transaction_mosaics AS tm
+			{mosaic_join}
+			WHERE tm.transaction_id = ANY(%s::bigint[])
+				AND tm.role <> 'metadata_target'::symbol_transaction_mosaic_role
+			ORDER BY tm.transaction_id, tm.position
 			''',
 			(transaction_ids,))
 		transaction_mosaic_rows = cursor.fetchall()
-		if is_non_public_state(sync_state) and self._requires_current_transaction_metadata(transaction_mosaic_rows):
+
+		if is_metadata_unsafe and self._requires_current_transaction_metadata(transaction_mosaic_rows):
 			raise SymbolDataUnavailable(
 				'Symbol transaction data is unavailable: mosaic display depends on current state '
 				'in dirty or repairing state')
 
-		excluded_native_mosaic_id = None
-		if is_non_public_state(sync_state) and self.native_mosaic_info:
-			excluded_native_mosaic_id = self.native_mosaic_info.id
+		mosaics_by_transaction_map = {transaction_id: [] for transaction_id in transaction_ids}
+		for row in transaction_mosaic_rows:
+			if row[3] != 'transfer':
+				continue
 
-		mosaic_state_by_id = SymbolDatabase._fetch_transaction_mosaic_state(
-			cursor, transaction_mosaic_rows, excluded_native_mosaic_id)
-		mosaics_by_transaction = SymbolDatabase._map_transaction_mosaics(
-			transaction_ids, transaction_mosaic_rows, mosaic_state_by_id)
-		return [TransactionRecord(*row, tuple(mosaics_by_transaction[row[0]])) for row in transaction_rows]
+			normalized_id = normalize_mosaic_id(row[1])
+			divisibility = (
+				self.native_mosaic_info.divisibility
+				if self.native_mosaic_info and normalized_id == self.native_mosaic_info.id else row[5])
+			mosaics_by_transaction_map[row[0]].append(TransactionMosaicRecord(normalized_id, row[2], divisibility, row[6]))
+
+		return mosaics_by_transaction_map
 
 	def _requires_current_transaction_metadata(self, transaction_mosaic_rows):
 		for row in transaction_mosaic_rows:
@@ -1059,36 +1119,6 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 			return True
 
 		return False
-
-	@staticmethod
-	def _fetch_transaction_mosaic_state(cursor, transaction_mosaic_rows, excluded_mosaic_id=None):
-		mosaic_ids = list(dict.fromkeys(
-			row[1] for row in transaction_mosaic_rows
-			if excluded_mosaic_id is None or normalize_mosaic_id(row[1]) != excluded_mosaic_id))
-		if not mosaic_ids:
-			return {}
-
-		cursor.execute(
-			'''
-			SELECT mosaic_id, divisibility, alias_names
-			FROM symbol_mosaics
-			WHERE mosaic_id = ANY(%s::varchar[])
-			''',
-			(mosaic_ids,))
-		return {
-			mosaic_id: (divisibility, alias_names)
-			for mosaic_id, divisibility, alias_names in cursor.fetchall()
-		}
-
-	@staticmethod
-	def _map_transaction_mosaics(transaction_ids, transaction_mosaic_rows, mosaic_state_by_id):
-		mosaics_by_transaction = {transaction_id: [] for transaction_id in transaction_ids}
-		for transaction_id, mosaic_id, amount, role, position in transaction_mosaic_rows:
-			divisibility, alias_names = mosaic_state_by_id.get(mosaic_id, (None, None))
-			mosaics_by_transaction[transaction_id].append(TransactionMosaicRecord(
-				mosaic_id, amount, role, position, divisibility, alias_names))
-
-		return mosaics_by_transaction
 
 	def try_get_related_metadata(self, query):
 		"""Reads sync state, exact parent and metadata from one snapshot."""
@@ -1177,8 +1207,9 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 				self._fetch_namespace_ancestors(cursor, row_by_id)
 				for row in row_by_id.values():
 					self._assert_namespace_row_is_safe(row, readable_height)
-				namespace_levels = {
-					row['namespace_id']: self._create_namespace_levels(row, row_by_id) for row in page_rows}
+
+				namespace_hierarchies = {
+					row['namespace_id']: self._create_namespace_hierarchy(row, row_by_id) for row in page_rows}
 				self._validate_namespace_families(cursor, page_rows, readable_height)
 
 				descendant_counts = self._fetch_namespace_descendant_counts(
@@ -1188,7 +1219,7 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 
 				return [self._create_namespace_view(
 					row,
-					namespace_levels[row['namespace_id']],
+					namespace_hierarchies[row['namespace_id']],
 					block_timestamps.get(row['start_height']),
 					descendant_counts[row['namespace_id']])
 					for row in page_rows]
@@ -1197,7 +1228,6 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 		"""Builds pending transaction views and enriches transfer mosaics in one batch."""
 
 		records = [create_unconfirmed_record(item_map, network) for item_map in transactions]
-
 		embedded_by_hash_map = {}
 		aggregate_hashes = set()
 		mosaic_ids_map = {}
@@ -1208,23 +1238,26 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 			if record.transaction_type in AGGREGATE_TYPES:
 				aggregate_hashes.add(record.transaction_hash)
 
-			for mosaic_id, _ in record.mosaics:
-				mosaic_ids_map[mosaic_id] = None
+			mosaic_ids_map.update({mosaic.mosaic_id: None for mosaic in record.mosaics})
 
 		mosaic_divisibility_map = self.get_mosaic_divisibility(list(mosaic_ids_map), self.native_mosaic_info)
 
-		views = []
+		transactions = []
 		for record in records:
 			if record.aggregate_hash in aggregate_hashes:
 				continue
 
+			record = record._replace(mosaics=resolve_transaction_mosaics(record.mosaics, mosaic_divisibility_map))
 			embedded_records = ()
 			if record.transaction_type in AGGREGATE_TYPES:
-				embedded_records = sorted(embedded_by_hash_map.get(record.transaction_hash, []), key=lambda child: child.embedded_index)
+				embedded_records = tuple(
+					embedded._replace(mosaics=resolve_transaction_mosaics(embedded.mosaics, mosaic_divisibility_map))
+					for embedded in sorted(
+						embedded_by_hash_map.get(record.transaction_hash, ()), key=lambda embedded: embedded.embedded_index))
 
-			views.append(SymbolTransactionView(record, mosaic_divisibility_map, embedded_records))
+			transactions.append(record._replace(embedded_transactions=embedded_records))
 
-		return views
+		return transactions
 
 	def get_mosaic_divisibility(self, mosaic_ids, native_mosaic_info=None):
 		"""Maps requested IDs to resolved IDs and divisibilities, querying only mosaics without configured metadata."""
@@ -1232,6 +1265,7 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 		divisibility_map = {native_mosaic_info.id: native_mosaic_info.divisibility} if native_mosaic_info is not None else {}
 		resolved_ids_map = {}
 		mosaic_ids_to_resolve = []
+
 		for mosaic_id in mosaic_ids:
 			upper_id = mosaic_id.upper()
 			if upper_id in divisibility_map:
@@ -1299,11 +1333,11 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 					descendant_rows = self._fetch_namespace_descendants(
 						cursor, target, row_by_id, readable_height)
 
-				namespace_levels = self._create_namespace_levels(target, row_by_id)
+				hierarchy = self._create_namespace_hierarchy(target, row_by_id)
 				block_timestamps = self._fetch_namespace_block_timestamps(
 					cursor, [target['start_height']])
 				namespace_view = self._create_namespace_view(
-					target, namespace_levels, block_timestamps.get(target['start_height']), len(descendant_rows))
+					target, hierarchy, block_timestamps.get(target['start_height']), len(descendant_rows))
 
 				all_selected_rows = [target, *descendant_rows]
 				alias_rows = [row for row in all_selected_rows if row['alias_type'] == 'mosaic']
@@ -1318,11 +1352,12 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 					for row in descendant_rows]
 				return NamespaceDetailRecord(namespace_view, sub_namespaces, mosaic_groups)
 
-	def _create_namespace_view(self, row, namespace_levels, start_timestamp, sub_namespace_count):
+	def _create_namespace_view(self, row, hierarchy, start_timestamp, sub_namespace_count):
 		return SymbolNamespaceView(
 			namespace_id=row['namespace_id'],
 			full_name=row['full_name'],
-			levels=namespace_levels,
+			root_name=hierarchy.root_name,
+			levels=hierarchy.levels,
 			alias_type=row['alias_type'],
 			alias_mosaic_id=row['alias_mosaic_id'],
 			alias_address=self._format_namespace_address(row['alias_address']),
@@ -1364,7 +1399,8 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 			frontier = next_frontier
 
 		for row in descendant_rows:
-			cls._create_namespace_levels(row, row_by_id)
+			cls._create_namespace_hierarchy(row, row_by_id)
+
 		descendant_rows.sort(key=lambda row: (cls._namespace_public_name(row), row['namespace_id'].upper()))
 		return descendant_rows
 
@@ -1395,7 +1431,8 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 			row_by_id[row['namespace_id']] = row
 
 		for row in family_rows:
-			cls._create_namespace_levels(row, family_by_id)
+			cls._create_namespace_hierarchy(row, family_by_id)
+
 		return descendant_rows
 
 	@classmethod
@@ -1609,7 +1646,7 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 			raise SymbolDataUnavailable('Symbol namespace data is unavailable')
 
 	@staticmethod
-	def _create_namespace_levels(row, row_by_id):
+	def _create_namespace_hierarchy(row, row_by_id):
 		path = []
 		current = row
 		seen = set()
@@ -1642,7 +1679,7 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 				'parentId': level['parent_id'].upper() if level['parent_id'] else None
 			})
 
-		return levels
+		return NamespaceHierarchy(levels, path[-1]['name'])
 
 	@staticmethod
 	def _format_namespace_address(value):
@@ -1809,6 +1846,7 @@ class SymbolDatabase(SymbolTransactionDetailMixin, DatabaseConnectionPool):  # p
 			total_voting_balance=result[24],
 			previous_importance_block_hash=bytes_or_none(result[25]),
 			block_reward=result[26],
+			transactions_count=result[27],
 			is_finalized=bool(finalized_height and result[0] <= finalized_height)
 		)
 

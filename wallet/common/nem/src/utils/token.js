@@ -1,3 +1,4 @@
+import { addressFromPublicKey } from './account';
 import { MosaicPropertyName } from '../constants';
 import { ApiError, absoluteToRelativeAmount } from 'wallet-common-core';
 
@@ -62,16 +63,19 @@ export const getMosaicProperty = (properties, propertyName, defaultValue = '0') 
 /**
  * Builds a TokenInfo object from a NEM mosaic definition DTO.
  * The DTO comes from /mosaic/definition/page or /account/mosaic/owned/definition.
- * @param {{ id: { namespaceId: string, name: string }, properties: Array }} mosaicDefinitionDTO - The mosaic definition DTO.
+ * @param {{ creator: string, id: { namespaceId: string, name: string }, properties: Array }} mosaicDefinitionDTO - The mosaic
+ * definition DTO.
+ * @param {string} networkIdentifier - The network identifier.
  * @returns {TokenInfo} The token info object.
  */
-export const tokenInfoFromDTO = mosaicDefinitionDTO => {
+export const tokenInfoFromDTO = (mosaicDefinitionDTO, networkIdentifier) => {
 	const id = tokenIdFromRaw(mosaicDefinitionDTO.id);
 
 	return {
 		id,
 		name: id,
 		divisibility: parseInt(getMosaicProperty(mosaicDefinitionDTO.properties, MosaicPropertyName.DIVISIBILITY)),
+		creator: addressFromPublicKey(mosaicDefinitionDTO.creator, networkIdentifier),
 		supply: parseInt(getMosaicProperty(mosaicDefinitionDTO.properties, MosaicPropertyName.INITIAL_SUPPLY)),
 		isSupplyMutable: getMosaicProperty(mosaicDefinitionDTO.properties, MosaicPropertyName.SUPPLY_MUTABLE) === 'true',
 		isTransferable: getMosaicProperty(mosaicDefinitionDTO.properties, MosaicPropertyName.TRANSFERABLE) !== 'false'
@@ -82,16 +86,23 @@ export const tokenInfoFromDTO = mosaicDefinitionDTO => {
  * Converts a list of raw mosaic DTOs to normalized Token objects using a tokenInfos map.
  * @param {Array} mosaicsDTO - The raw mosaic DTOs (each with `mosaicId`/`id` and `quantity`/`amount`).
  * @param {Record<string, TokenInfo>} tokenInfos - The map of TokenInfo keyed by token id string (from fetchTokenInfos).
+ * @param {bigint|number|string} [transferAmount] - The transfer amount in absolute units. Used as multiplier for each token quantity.
  * @returns {Array.<Token | RawToken>} The normalized token list.
  */
-export const tokenListFromDTO = (mosaicsDTO, tokenInfos) => {
+export const tokenListFromDTO = (mosaicsDTO, tokenInfos, transferAmount) => {
 	if (!mosaicsDTO || !tokenInfos)
 		throw new ApiError('Failed to format tokens. Missing required parameters.');
+
+	// Micro XEM in one XEM, as NIS Amount.MICRONEMS_IN_NEM.
+	const microXemInXem = 1_000_000n;
 
 	return mosaicsDTO.map(mosaicDTO => {
 		const tokenId = tokenIdFromRaw(mosaicDTO.mosaicId || mosaicDTO.id);
 		const tokenInfo = tokenInfos[tokenId];
-		const rawAmount = mosaicDTO.quantity ?? mosaicDTO.amount;
+		const quantity = mosaicDTO.quantity ?? mosaicDTO.amount;
+		const rawAmount = transferAmount === undefined
+			? quantity
+			: (BigInt(transferAmount) * BigInt(quantity) / microXemInXem).toString();
 
 		// Without resolved token info the relative amount and metadata are unavailable.
 		if (!tokenInfo) {
